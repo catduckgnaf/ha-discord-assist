@@ -144,3 +144,20 @@ The mirror must authenticate over **SSH** (deploy key). An HTTPS personal
 access token would need the `workflow` scope just to push changes under
 `.github/workflows/`, and tag pushes made with such a token may not reliably
 trigger Actions; SSH avoids both problems.
+
+## HACS validation
+
+The GitHub mirror runs `.github/workflows/validate.yaml` ("Validate") on
+every push and nightly: `hacs/action` checks the repository against the
+[HACS publishing requirements](https://hacs.xyz/docs/publish/include) and
+`hassfest` validates the integration manifest. Two HACS checks depend on
+GitHub repository state rather than code:
+
+- **topics** — the GitHub repo must have at least one topic. Topics are set
+  in the GitHub repository settings (or via
+  `PUT /repos/aarontc/home-assistant-discord-conversation/topics`), not in
+  this repo's files.
+- **brands** — listing in
+  [home-assistant/brands](https://github.com/home-assistant/brands) is
+  deliberately skipped (`ignore: brands` in the workflow); revisit if the
+  integration is ever submitted there.

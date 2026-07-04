@@ -16,6 +16,13 @@ readable companion that highlights user-facing changes.
   `release.yaml` workflow then publishes a GitHub Release per tag (which is
   what HACS reads to detect new versions).
 
+### Fixed
+
+- **Nightly HACS validation.** The `Validate` workflow on the GitHub mirror
+  now skips the `brands` check (the integration is not listed in
+  home-assistant/brands), and the GitHub repository carries topics, so the
+  scheduled `hacs/action` run passes again.
+
 ## 0.1.0
 
 Initial release. Bridges the Home Assistant Assist conversation agent to a
