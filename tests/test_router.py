@@ -4,13 +4,13 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from custom_components.discord_conversation.const import (
+from custom_components.discord_assist.const import (
     CONF_AGENT_ID,
     CONF_ALLOWLIST,
     CONF_USER_MAP,
 )
-from custom_components.discord_conversation.conversation_cache import ConversationCache
-from custom_components.discord_conversation.conversation_router import (
+from custom_components.discord_assist.conversation_cache import ConversationCache
+from custom_components.discord_assist.conversation_router import (
     ConversationRouter,
     make_conversation_key,
     resolve_ha_user_id,
@@ -61,11 +61,11 @@ def test_resolve_ha_user_id(user_map, fallback, discord_id, expected):
     ],
 )
 def test_should_respond_scope(kwargs, expected):
-    assert _router().should_respond(**kwargs) is expected
+    assert _router(user_map={1: "ha-a"}).should_respond(**kwargs) is expected
 
 
 def test_should_respond_dms_disabled():
-    router = _router(respond_dms=False)
+    router = _router(respond_dms=False, user_map={1: "ha-a"})
     result = router.should_respond(
         is_dm=True, was_mentioned=False, channel_id=0, author_id=1
     )
@@ -73,7 +73,7 @@ def test_should_respond_dms_disabled():
 
 
 def test_should_respond_allowlist_blocks_unlisted():
-    router = _router(allowlist={42})
+    router = _router(allowlist={42}, fallback_user="ha-fb")
     unlisted = router.should_respond(
         is_dm=True, was_mentioned=False, channel_id=0, author_id=1
     )
@@ -91,7 +91,7 @@ async def test_process_calls_async_converse_and_caches():
         conversation_id="conv-1",
     )
     with patch(
-        "custom_components.discord_conversation.conversation_router.async_converse",
+        "custom_components.discord_assist.conversation_router.async_converse",
         new=AsyncMock(return_value=fake_result),
     ) as mock_converse:
         reply = await router.process(
@@ -108,12 +108,12 @@ async def test_process_calls_async_converse_and_caches():
 
 
 async def test_process_handles_missing_speech():
-    router = _router()
+    router = _router(user_map={1: "ha-a"})
     fake_result = SimpleNamespace(
         response=SimpleNamespace(speech={}), conversation_id="conv-2"
     )
     with patch(
-        "custom_components.discord_conversation.conversation_router.async_converse",
+        "custom_components.discord_assist.conversation_router.async_converse",
         new=AsyncMock(return_value=fake_result),
     ):
         reply = await router.process(
@@ -137,3 +137,47 @@ def test_from_entry_skips_non_numeric_allowlist_and_user_map():
     router = ConversationRouter.from_entry(hass, entry)
     assert router.allowlist == {123456789, 987654321}
     assert router.user_map == {111: "ha-user-a"}
+
+
+def test_should_respond_fails_closed_with_no_identity():
+    """No allowlist, no mapping, no fallback: nobody gets in."""
+    router = _router()
+    result = router.should_respond(
+        is_dm=True, was_mentioned=False, channel_id=0, author_id=1
+    )
+    assert result is False
+    assert router.has_authorized_users is False
+
+
+def test_allowlisted_user_needs_fallback_identity():
+    no_fallback = _router(allowlist={42})
+    with_fallback = _router(allowlist={42}, fallback_user="ha-fb")
+    kwargs = dict(is_dm=True, was_mentioned=False, channel_id=0, author_id=42)
+    assert no_fallback.should_respond(**kwargs) is False
+    assert with_fallback.should_respond(**kwargs) is True
+
+
+def test_fallback_alone_does_not_open_bot_to_everyone():
+    router = _router(fallback_user="ha-fb")
+    result = router.should_respond(
+        is_dm=True, was_mentioned=False, channel_id=0, author_id=1
+    )
+    assert result is False
+
+
+def test_should_respond_in_thread_of_listened_channel():
+    router = _router(user_map={1: "ha-a"})
+    in_thread = router.should_respond(
+        is_dm=False, was_mentioned=False, channel_id=999, author_id=1, parent_id=111
+    )
+    other_thread = router.should_respond(
+        is_dm=False, was_mentioned=False, channel_id=998, author_id=1, parent_id=222
+    )
+    assert in_thread is True
+    assert other_thread is False
+
+
+async def test_process_refuses_unauthorized_user():
+    router = _router()
+    with pytest.raises(PermissionError):
+        await router.process(text="hi", discord_user_id=1, conversation_key="dm:1")

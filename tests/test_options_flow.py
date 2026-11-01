@@ -6,7 +6,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.discord_conversation.const import (
+from custom_components.discord_assist.const import (
     CONF_AGENT_ID,
     CONF_BOT_ID,
     CONF_CHANNELS,
@@ -50,7 +50,7 @@ async def test_options_menu_shown(hass: HomeAssistant):
 async def test_options_settings_updates(hass: HomeAssistant):
     entry = _entry(hass)
     with patch(
-        "custom_components.discord_conversation.config_flow.list_text_channels",
+        "custom_components.discord_assist.config_flow.list_text_channels",
         new=AsyncMock(return_value=[("555", "Home / #general")]),
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)

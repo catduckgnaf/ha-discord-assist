@@ -6,6 +6,7 @@ import logging
 
 import discord
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .conversation_router import ConversationRouter, make_conversation_key
 from .text_utils import chunk_message, strip_self_mention
@@ -16,27 +17,55 @@ ERROR_REPLY = "Sorry, I hit an error talking to Home Assistant."
 EMPTY_REPLY = "(no response)"
 
 
-class DiscordConversationClient(discord.Client):
+class DiscordAssistClient(discord.Client):
     """Listens for messages and routes them to the HA conversation agent."""
 
-    def __init__(self, hass: HomeAssistant, router: ConversationRouter) -> None:
+    def __init__(
+        self, hass: HomeAssistant, router: ConversationRouter, status_signal: str
+    ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
-        super().__init__(intents=intents)
+        # Agent output is untrusted text: never let it ping @everyone, roles,
+        # or users.
+        super().__init__(
+            intents=intents, allowed_mentions=discord.AllowedMentions.none()
+        )
         self.hass = hass
         self.router = router
+        self.connected = False
+        self._status_signal = status_signal
+
+    def _set_connected(self, connected: bool) -> None:
+        if connected != self.connected:
+            self.connected = connected
+            async_dispatcher_send(self.hass, self._status_signal)
+
+    async def on_ready(self) -> None:
+        self._set_connected(True)
+
+    async def on_resumed(self) -> None:
+        self._set_connected(True)
+
+    async def on_disconnect(self) -> None:
+        self._set_connected(False)
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author == self.user or message.author.bot:
             return
 
         is_dm = isinstance(message.channel, discord.DMChannel)
+        parent_id = (
+            message.channel.parent_id
+            if isinstance(message.channel, discord.Thread)
+            else None
+        )
         was_mentioned = self.user in message.mentions
         if not self.router.should_respond(
             is_dm=is_dm,
             was_mentioned=was_mentioned,
             channel_id=message.channel.id,
             author_id=message.author.id,
+            parent_id=parent_id,
         ):
             return
 

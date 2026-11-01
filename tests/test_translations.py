@@ -4,9 +4,7 @@ from pathlib import Path
 
 def _load(name):
     base = (
-        Path(__file__).resolve().parent.parent
-        / "custom_components"
-        / "discord_conversation"
+        Path(__file__).resolve().parent.parent / "custom_components" / "discord_assist"
     )
     return json.loads((base / name).read_text())
 

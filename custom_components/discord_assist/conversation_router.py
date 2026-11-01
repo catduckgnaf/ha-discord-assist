@@ -48,7 +48,7 @@ def make_conversation_key(*, is_dm: bool, channel_id: int, author_id: int) -> st
 def resolve_ha_user_id(
     user_map: dict[int, str], fallback_user: str | None, discord_user_id: int
 ) -> str | None:
-    """Mapped HA user, else fallback HA user, else None (unrestricted Context)."""
+    """Mapped HA user, else fallback HA user, else None (no identity)."""
     return user_map.get(discord_user_id) or fallback_user
 
 
@@ -67,14 +67,42 @@ class ConversationRouter:
     fallback_user: str | None
     cache: ConversationCache
 
+    @property
+    def has_authorized_users(self) -> bool:
+        """Whether anyone at all can talk to the bot with this configuration."""
+        return bool(self.user_map) or (
+            bool(self.allowlist) and self.fallback_user is not None
+        )
+
+    def ha_user_for(self, discord_user_id: int) -> str | None:
+        """HA user a Discord user acts as, or None if they may not use the bot.
+
+        Fails closed: a Discord user must be mapped or allowlisted, and must
+        resolve to a real HA user. Nobody ever gets an identity-less Context,
+        which Home Assistant treats as unrestricted.
+        """
+        if (
+            discord_user_id not in self.user_map
+            and discord_user_id not in self.allowlist
+        ):
+            return None
+        return resolve_ha_user_id(self.user_map, self.fallback_user, discord_user_id)
+
     def should_respond(
-        self, *, is_dm: bool, was_mentioned: bool, channel_id: int, author_id: int
+        self,
+        *,
+        is_dm: bool,
+        was_mentioned: bool,
+        channel_id: int,
+        author_id: int,
+        parent_id: int | None = None,
     ) -> bool:
-        if self.allowlist and author_id not in self.allowlist:
+        if self.ha_user_for(author_id) is None:
             return False
         if is_dm:
             return self.respond_dms
-        if channel_id in self.channels:
+        # A thread inherits its parent channel's listening setting.
+        if channel_id in self.channels or parent_id in self.channels:
             return True
         if was_mentioned:
             return self.respond_mentions
@@ -83,10 +111,10 @@ class ConversationRouter:
     async def process(
         self, *, text: str, discord_user_id: int, conversation_key: str
     ) -> str:
-        ha_user_id = resolve_ha_user_id(
-            self.user_map, self.fallback_user, discord_user_id
-        )
-        context = Context(user_id=ha_user_id) if ha_user_id else Context()
+        ha_user_id = self.ha_user_for(discord_user_id)
+        if ha_user_id is None:
+            raise PermissionError(f"Discord user {discord_user_id} is not authorized")
+        context = Context(user_id=ha_user_id)
         conversation_id = self.cache.get(conversation_key)
         result = await async_converse(
             self.hass,

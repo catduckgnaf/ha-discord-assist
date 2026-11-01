@@ -1,4 +1,6 @@
-# Discord Conversation
+# Discord Assist
+
+Talk to Home Assistant's Assist from Discord.
 
 A Home Assistant custom integration that exposes the Assist conversation agent over a Discord bot. Users can send messages in configured channels or DMs, and the bot replies using whichever conversation agent you select (e.g. a local LLM, OpenAI, or the built-in Home Assistant Assist agent).
 
@@ -8,17 +10,24 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 - Responds to direct messages (optional)
 - Responds to @mentions in any channel the bot can see (optional)
 - Per-conversation context window with configurable idle timeout
-- Allowlist to restrict which Discord users can interact with the bot
+- Replies in threads under the channels it listens to
 - Maps Discord user IDs to Home Assistant users so commands run as the right person
+- Fails closed: Discord users it cannot run as a Home Assistant user are ignored
+- Replies can never ping `@everyone`, roles, or users
+- Retries setup when Discord is unreachable and reloads if the gateway dies
+- `Discord gateway` connectivity sensor for alerting
+- Repair issues for "nobody is authorized" and a missing Message Content intent
+- One-click import from the Discord Conversation integration it was forked from
 
-## Security warning
+## Security model
 
-**The conversation agent can control your home.** Anyone who can send messages to the bot can issue commands that Home Assistant will execute. Before deploying:
+**The conversation agent can control your home.** Discord Assist only answers a Discord user when it knows which Home Assistant user to run the request as:
 
-- Configure `channels` to limit which channels the bot reads.
-- Set `allowlist` to restrict access to specific Discord user IDs. With an empty allowlist, any Discord user who can reach the bot can control your home.
-- Set a `fallback_ha_user` with the minimum privileges needed. Do not leave this pointing at a Home Assistant admin account for general users.
-- Revoke any Discord channel permissions that would let untrusted users DM the bot or add it to servers you do not control.
+- A Discord user with a **user mapping** acts as the mapped Home Assistant user.
+- A Discord user on the **allowlist** without a mapping acts as the **fallback Home Assistant user**. With no fallback user set, allowlisted users are ignored.
+- Everyone else is ignored, even in channels the bot listens to.
+
+Requests never run without a Home Assistant user, so permissions always apply. Use a dedicated, least-privilege account as the fallback user, and limit `channels` to places you trust. If nobody is authorized, a repair issue appears under **Settings → System → Repairs**.
 
 ## Installation
 
@@ -31,8 +40,8 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 
 1. Open HACS in Home Assistant.
 2. Click the three-dot menu → **Custom repositories**.
-3. Add `https://github.com/aarontc/home-assistant-discord-conversation` with category **Integration**.
-4. Find **Discord Conversation** in the HACS integration list and install it.
+3. Add `https://github.com/catduckgnaf/ha-discord-assist` with category **Integration**.
+4. Find **Discord Assist** in the HACS integration list and install it.
 5. Restart Home Assistant.
 
 ## Discord setup
@@ -53,9 +62,13 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 3. Under **Bot Permissions**, select **Read Messages/View Channels**, **Send Messages**, and **Read Message History**.
 4. Copy the generated URL, open it in your browser, and invite the bot to your server.
 
+## Migrating from Discord Conversation
+
+If the Discord Conversation integration is already set up, adding Discord Assist offers **Import from Discord Conversation**. That copies the bot token and every setting, then disables (does not delete) the old entry so the bot is not driven twice. Once you are happy, remove Discord Conversation from HACS. Unmapped, non-allowlisted users who could use the old integration are ignored here.
+
 ## Configuration
 
-1. In Home Assistant, go to **Settings → Devices & Services → Add Integration** and search for **Discord Conversation**.
+1. In Home Assistant, go to **Settings → Devices & Services → Add Integration** and search for **Discord Assist**.
 2. Enter the bot token.
 3. Select a conversation agent (e.g. `conversation.home_assistant`).
 4. Select the channels the bot should read. Only text channels the bot can see are listed.
@@ -68,7 +81,7 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 | Respond to @mentions anywhere | Yes | Whether to respond when the bot is @mentioned in any channel |
 | Idle minutes | 30 | Minutes of inactivity before conversation context resets |
 | Language | (HA default) | BCP-47 language tag passed to the conversation agent |
-| Allowed Discord user IDs | (everyone) | Comma-separated Discord user IDs; leave blank to allow all |
+| Allowed Discord user IDs | (none) | Discord user IDs allowed to use the bot as the fallback user; mapped users are always allowed |
 
 ## User mapping
 
@@ -81,7 +94,7 @@ Map a Discord user ID to a specific Home Assistant user so commands run with tha
 
 ### Add a mapping
 
-1. Go to **Settings → Devices & Services**, find the Discord Conversation entry, and click **Configure**.
+1. Go to **Settings → Devices & Services**, find the Discord Assist entry, and click **Configure**.
 2. Choose **Add a Discord-to-Home-Assistant user mapping**.
 3. Enter the Discord user ID and select the Home Assistant user.
 
@@ -92,3 +105,7 @@ Set **Fallback Home Assistant user** in options to control which HA user is used
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Credits
+
+Discord Assist is a hard fork of [Discord Conversation](https://github.com/aarontc/home-assistant-discord-conversation) by Aaron ([@aarontc](https://github.com/aarontc)), used under the MIT license.

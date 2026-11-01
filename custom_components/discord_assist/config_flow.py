@@ -1,4 +1,4 @@
-"""Config and options flow for Discord Conversation."""
+"""Config and options flow for Discord Assist."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant.config_entries import (
     ConfigEntry,
+    ConfigEntryDisabler,
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
@@ -47,6 +48,7 @@ from .const import (
     DEFAULT_RESPOND_DMS,
     DEFAULT_RESPOND_MENTIONS,
     DOMAIN,
+    LEGACY_DOMAIN,
 )
 from .discord_api import CannotConnect, InvalidAuth, list_text_channels, validate_token
 
@@ -94,8 +96,8 @@ def build_config_schema(channel_options: list[SelectOptionDict]) -> vol.Schema:
     )
 
 
-class DiscordConversationConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle the Discord Conversation config flow."""
+class DiscordAssistConfigFlow(ConfigFlow, domain=DOMAIN):
+    """Handle the Discord Assist config flow."""
 
     VERSION = 1
 
@@ -103,7 +105,54 @@ class DiscordConversationConfigFlow(ConfigFlow, domain=DOMAIN):
         self._token: str | None = None
         self._bot_id: str | None = None
 
+    def _importable_legacy_entries(self) -> list[ConfigEntry]:
+        """Discord Conversation entries whose bot is not set up here yet."""
+        configured = {e.unique_id for e in self._async_current_entries()}
+        return [
+            e
+            for e in self.hass.config_entries.async_entries(LEGACY_DOMAIN)
+            if e.unique_id not in configured and CONF_TOKEN in e.data
+        ]
+
     async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is None and self._importable_legacy_entries():
+            return self.async_show_menu(
+                step_id="user", menu_options=["import_legacy", "token"]
+            )
+        return await self.async_step_token(user_input)
+
+    async def async_step_import_legacy(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Copy token and settings from a Discord Conversation entry.
+
+        The old entry is disabled, not deleted, so the same bot token is never
+        driven by two integrations at once and the move can be undone.
+        """
+        legacy = self._importable_legacy_entries()
+        if not legacy:
+            return self.async_abort(reason="no_legacy_entry")
+        old = legacy[0]
+        try:
+            bot_id = await validate_token(old.data[CONF_TOKEN])
+        except InvalidAuth:
+            return self.async_abort(reason="legacy_invalid_auth")
+        except CannotConnect:
+            return self.async_abort(reason="cannot_connect")
+        await self.async_set_unique_id(bot_id)
+        self._abort_if_unique_id_configured()
+        await self.hass.config_entries.async_set_disabled_by(
+            old.entry_id, ConfigEntryDisabler.USER
+        )
+        return self.async_create_entry(
+            title="Discord Assist",
+            data={CONF_TOKEN: old.data[CONF_TOKEN], CONF_BOT_ID: bot_id},
+            options=dict(old.options),
+        )
+
+    async def async_step_token(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
@@ -122,7 +171,7 @@ class DiscordConversationConfigFlow(ConfigFlow, domain=DOMAIN):
                 return await self.async_step_config()
 
         return self.async_show_form(
-            step_id="user", data_schema=STEP_USER_SCHEMA, errors=errors
+            step_id="token", data_schema=STEP_USER_SCHEMA, errors=errors
         )
 
     async def async_step_config(
@@ -135,7 +184,7 @@ class DiscordConversationConfigFlow(ConfigFlow, domain=DOMAIN):
             options.setdefault(CONF_USER_MAP, {})
             options.setdefault(CONF_FALLBACK_USER, None)
             return self.async_create_entry(
-                title="Discord Conversation",
+                title="Discord Assist",
                 data={CONF_TOKEN: self._token, CONF_BOT_ID: self._bot_id},
                 options=options,
             )
@@ -152,7 +201,7 @@ class DiscordConversationConfigFlow(ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
-        return DiscordConversationOptionsFlow()
+        return DiscordAssistOptionsFlow()
 
     async def async_step_reauth(
         self, entry_data: Mapping[str, Any]
@@ -193,7 +242,7 @@ async def _ha_user_options(hass: HomeAssistant) -> list[SelectOptionDict]:
     ]
 
 
-class DiscordConversationOptionsFlow(OptionsFlowWithReload):
+class DiscordAssistOptionsFlow(OptionsFlowWithReload):
     """Options: general settings and Discord->HA user mappings."""
 
     async def async_step_init(

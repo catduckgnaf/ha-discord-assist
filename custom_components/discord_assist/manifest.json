@@ -1,0 +1,13 @@
+{
+  "domain": "discord_assist",
+  "name": "Discord Assist",
+  "codeowners": ["@catduckgnaf"],
+  "config_flow": true,
+  "dependencies": ["conversation"],
+  "documentation": "https://github.com/catduckgnaf/ha-discord-assist",
+  "integration_type": "service",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/catduckgnaf/ha-discord-assist/issues",
+  "requirements": ["discord.py==2.7.1"],
+  "version": "1.0.0"
+}

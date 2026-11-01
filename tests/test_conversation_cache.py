@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from custom_components.discord_conversation.conversation_cache import ConversationCache
+from custom_components.discord_assist.conversation_cache import ConversationCache
 
 
 class FakeClock:

@@ -1,0 +1,110 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Discord Assist",
+        "description": "An existing Discord Conversation bot was found. Import its token and settings (the old entry is disabled, not deleted), or enter a bot token.",
+        "menu_options": {
+          "import_legacy": "Import from Discord Conversation",
+          "token": "Enter a bot token"
+        }
+      },
+      "config": {
+        "title": "Conversation settings",
+        "data": {
+          "agent_id": "Conversation agent",
+          "channels": "Channels to listen in",
+          "respond_dms": "Respond to direct messages",
+          "respond_mentions": "Respond to @mentions anywhere",
+          "idle_minutes": "Reset a conversation after this many idle minutes",
+          "language": "Language (blank = Home Assistant default)",
+          "allowlist": "Allowed Discord user IDs (act as the fallback user; mapped users are always allowed)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-enter Discord bot token",
+        "data": {
+          "token": "Bot token"
+        }
+      },
+      "token": {
+        "title": "Discord bot token",
+        "description": "Paste the bot token from the Discord Developer Portal. Enable the Message Content privileged intent for the application before using channel listening.",
+        "data": {
+          "token": "Bot token"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "The bot token was rejected by Discord.",
+      "cannot_connect": "Could not reach Discord. Check connectivity and try again.",
+      "invalid_user_id": "That is not a valid Discord user ID (digits only).",
+      "wrong_account": "That token belongs to a different bot than this entry."
+    },
+    "abort": {
+      "already_configured": "This Discord bot is already configured.",
+      "reauth_successful": "Token updated.",
+      "no_legacy_entry": "No Discord Conversation entry is available to import.",
+      "legacy_invalid_auth": "Discord rejected the token stored in the Discord Conversation entry. Set up with a new token instead.",
+      "cannot_connect": "Could not reach Discord. Check connectivity and try again."
+    }
+  },
+  "options": {
+    "error": {
+      "invalid_user_id": "That is not a valid Discord user ID (digits only)."
+    },
+    "step": {
+      "init": {
+        "title": "Discord Assist options",
+        "menu_options": {
+          "settings": "Conversation settings",
+          "add_user_map": "Add a Discord-to-Home-Assistant user mapping",
+          "remove_user_map": "Remove a user mapping"
+        }
+      },
+      "settings": {
+        "title": "Conversation settings",
+        "data": {
+          "agent_id": "Conversation agent",
+          "channels": "Channels to listen in",
+          "respond_dms": "Respond to direct messages",
+          "respond_mentions": "Respond to @mentions anywhere",
+          "idle_minutes": "Reset a conversation after this many idle minutes",
+          "language": "Language (blank = Home Assistant default)",
+          "allowlist": "Allowed Discord user IDs (act as the fallback user; mapped users are always allowed)",
+          "fallback_ha_user": "Fallback Home Assistant user for unmapped Discord users"
+        }
+      },
+      "add_user_map": {
+        "title": "Add user mapping",
+        "data": {
+          "discord_user_id": "Discord user ID",
+          "fallback_ha_user": "Home Assistant user"
+        }
+      },
+      "remove_user_map": {
+        "title": "Remove user mapping",
+        "data": {
+          "discord_user_id": "Discord user ID"
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "gateway": {
+        "name": "Discord gateway"
+      }
+    }
+  },
+  "issues": {
+    "no_authorized_users": {
+      "title": "Nobody can use {entry_title}",
+      "description": "Discord Assist only answers Discord users it can run as a Home Assistant user. Open the integration options and add a Discord-to-Home-Assistant user mapping, or set allowed Discord user IDs plus a fallback Home Assistant user. Until then the bot ignores every message."
+    },
+    "message_content_intent": {
+      "title": "{entry_title} needs the Message Content intent",
+      "description": "Discord refused the gateway connection because the bot does not have the Message Content privileged intent. Enable it under Bot > Privileged Gateway Intents in the Discord Developer Portal, then reload the integration."
+    }
+  }
+}

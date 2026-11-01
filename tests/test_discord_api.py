@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import pytest
 
-from custom_components.discord_conversation.discord_api import (
+from custom_components.discord_assist.discord_api import (
     CannotConnect,
     InvalidAuth,
     list_text_channels,
@@ -65,7 +65,7 @@ async def test_list_text_channels():
     with (
         patch("discord.Client", return_value=client),
         patch(
-            "custom_components.discord_conversation.discord_api.isinstance",
+            "custom_components.discord_assist.discord_api.isinstance",
             side_effect=lambda obj, typ: obj is text_channel,
         ),
     ):

@@ -3,13 +3,25 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 
-from custom_components.discord_conversation.bot import DiscordConversationClient
+from custom_components.discord_assist.bot import DiscordAssistClient
 
 
-def _message(content, *, author_bot=False, is_dm=False, mentions=None, channel_id=111):
-    dm_spec = discord.DMChannel
-    text_spec = discord.TextChannel
-    channel = MagicMock(spec=dm_spec) if is_dm else MagicMock(spec=text_spec)
+def _message(
+    content,
+    *,
+    author_bot=False,
+    is_dm=False,
+    mentions=None,
+    channel_id=111,
+    parent_id=None,
+):
+    if is_dm:
+        channel = MagicMock(spec=discord.DMChannel)
+    elif parent_id is not None:
+        channel = MagicMock(spec=discord.Thread)
+        channel.parent_id = parent_id
+    else:
+        channel = MagicMock(spec=discord.TextChannel)
     channel.id = channel_id
     channel.send = AsyncMock()
     typing_cm = MagicMock()
@@ -26,7 +38,9 @@ def _message(content, *, author_bot=False, is_dm=False, mentions=None, channel_i
 
 def _client(router, monkeypatch):
     with patch("discord.Client.__init__", return_value=None):
-        client = DiscordConversationClient(hass=object(), router=router)
+        client = DiscordAssistClient(
+            hass=object(), router=router, status_signal="test_signal"
+        )
     # discord.Client.user is normally read-only; stub it for tests
     monkeypatch.setattr(
         type(client), "user", property(lambda self: SimpleNamespace(id=999))
@@ -109,3 +123,34 @@ async def test_on_message_does_not_raise_when_send_fails(monkeypatch):
 
     # Must not raise
     await client.on_message(msg)
+
+
+def test_client_disables_all_mentions():
+    with patch("discord.Client.__init__", return_value=None) as mock_init:
+        DiscordAssistClient(hass=object(), router=MagicMock(), status_signal="s")
+    mentions = mock_init.call_args.kwargs["allowed_mentions"]
+    assert mentions.everyone is False
+    assert mentions.roles is False
+    assert mentions.users is False
+    assert mentions.replied_user is False
+
+
+async def test_on_message_passes_thread_parent(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = False
+    client = _client(router, monkeypatch)
+    await client.on_message(_message("hi", channel_id=999, parent_id=111))
+    assert router.should_respond.call_args.kwargs["parent_id"] == 111
+
+
+async def test_connection_state_dispatches_changes(monkeypatch):
+    client = _client(MagicMock(), monkeypatch)
+    with patch(
+        "custom_components.discord_assist.bot.async_dispatcher_send"
+    ) as mock_send:
+        await client.on_ready()
+        await client.on_ready()
+        assert client.connected is True
+        await client.on_disconnect()
+        assert client.connected is False
+    assert mock_send.call_count == 2

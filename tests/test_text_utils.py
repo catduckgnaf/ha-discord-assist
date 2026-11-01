@@ -1,6 +1,6 @@
 import pytest
 
-from custom_components.discord_conversation.text_utils import (
+from custom_components.discord_assist.text_utils import (
     chunk_message,
     strip_self_mention,
 )
