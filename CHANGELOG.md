@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0
+## 0.3.0
 
 Hard fork of Discord Conversation 0.2.1, renamed to Discord Assist
 (domain `discord_assist`).
