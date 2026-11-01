@@ -66,3 +66,24 @@ async def setup_core_components(hass: HomeAssistant) -> None:
     Setting up the homeassistant component here satisfies that requirement.
     """
     await async_setup_component(hass, "homeassistant", {})
+
+
+@pytest.fixture(autouse=True)
+def fake_discord_client():
+    """Keep entry setup off the network.
+
+    Reauth and options flows reload the entry, and setup logs in to Discord
+    before returning. Tests that care about the client patch it themselves.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    client = MagicMock()
+    client.login = AsyncMock()
+    client.connect = AsyncMock()
+    client.close = AsyncMock()
+    client.is_closed = MagicMock(return_value=True)
+    client.connected = False
+    with patch(
+        "custom_components.discord_assist.DiscordAssistClient", return_value=client
+    ):
+        yield client
