@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- Add the Home Assistant integration categories `ai_voice.voice_assistants` and `messaging_notifications.chat_apps` to the manifest, so the integration is categorised correctly in Home Assistant and the Marketplace catalog. No functional change.
+
 ## 0.3.0
 
 Hard fork of Discord Conversation 0.2.1, renamed to Discord Assist
