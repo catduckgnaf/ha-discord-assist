@@ -1,6 +1,10 @@
 {
   "domain": "discord_assist",
   "name": "Discord Assist",
+  "categories": [
+    "ai_voice.voice_assistants",
+    "messaging_notifications.chat_apps"
+  ],
   "codeowners": ["@catduckgnaf"],
   "config_flow": true,
   "dependencies": ["conversation"],
@@ -9,5 +13,5 @@
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/catduckgnaf/ha-discord-assist/issues",
   "requirements": ["discord.py==2.7.1"],
-  "version": "0.3.0"
+  "version": "0.3.1"
 }
