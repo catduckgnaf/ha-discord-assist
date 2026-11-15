@@ -50,6 +50,7 @@ RECONNECT_DELAY = 60
 
 ISSUE_NO_AUTHORIZED_USERS = "no_authorized_users"
 ISSUE_MESSAGE_CONTENT_INTENT = "message_content_intent"
+ISSUE_DUPLICATE_TOKEN = "duplicate_token"
 
 
 def signal_connection(entry_id: str) -> str:

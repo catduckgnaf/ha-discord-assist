@@ -243,7 +243,7 @@ async def test_long_reply_only_first_piece_is_a_reply(monkeypatch):
     assert len(calls) > 1
     assert_first_send_is_reply(msg.channel, to=msg)
     assert calls[0].kwargs["mention_author"] is False
-    assert all(c.kwargs == {} for c in calls[1:])
+    assert all(set(c.kwargs) == {"nonce"} for c in calls[1:])
 
 
 async def test_typing_failure_does_not_rerun_agent(monkeypatch):
@@ -393,7 +393,7 @@ async def test_slow_long_answer_edits_first_chunk_and_sends_rest(monkeypatch):
     # First send is the placeholder; the rest are the remaining chunks.
     assert sends[0].content == PLACEHOLDER_REPLY
     assert [c.content for c in sends[1:]] == chunks[1:]
-    assert all(c.kwargs == {} for c in sends[1:])
+    assert all(set(c.kwargs) == {"nonce"} for c in sends[1:])
     placeholder = sends[0].message
     assert len(placeholder.edits) == 1
     assert placeholder.content == chunks[0]

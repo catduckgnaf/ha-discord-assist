@@ -4,15 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
+from collections import deque
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
 import discord
 from homeassistant.core import Context, HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from .const import DEFAULT_PLACEHOLDER_DELAY, EVENT_MESSAGE
+from .const import (
+    DEFAULT_PLACEHOLDER_DELAY,
+    DOMAIN,
+    EVENT_MESSAGE,
+    ISSUE_DUPLICATE_TOKEN,
+    issue_id,
+)
 from .conversation_router import (
     AgentTimeout,
     ConversationRouter,
@@ -145,6 +154,13 @@ async def _bounded_typing(channel: discord.abc.Messageable) -> None:
             return
 
 
+# How many of our own sent message ids to remember when telling our own
+# messages apart from a foreign process using the same bot token. Bounded
+# so a long-lived client does not grow without limit; chunked replies send
+# only a handful of messages per turn, so this covers many turns.
+MAX_TRACKED_SENT_MESSAGES = 1000
+
+
 class DiscordAssistClient(discord.Client):
     """Listens for messages and routes them to the HA conversation agent."""
 
@@ -156,6 +172,7 @@ class DiscordAssistClient(discord.Client):
         *,
         placeholder_delay: float = DEFAULT_PLACEHOLDER_DELAY,
         recent_errors: RecentErrors | None = None,
+        entry_title: str | None = None,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -172,6 +189,127 @@ class DiscordAssistClient(discord.Client):
         self.connected = False
         self._status_signal = status_signal
         self.placeholder_delay = float(placeholder_delay)
+        self._entry_title = entry_title
+        self._sent_message_ids: set[int] = set()
+        self._sent_message_order: deque[int] = deque()
+        self._sent_nonces: set[str] = set()
+        self._sent_nonce_order: deque[str] = deque()
+        self._duplicate_token_warned = False
+
+    def record_sent_message(self, sent: Any) -> None:
+        """Remember a message this process sent, by id.
+
+        Every send path in this client goes through here (see
+        ``_send_to_channel``), so chunked replies are all recorded. An
+        edit keeps the original message id, so an edited reply stays
+        recorded, and any future interaction-response or webhook send
+        must record its returned message here as well. That is what
+        keeps our own messages from being mistaken for a second
+        process running with the same bot token.
+        """
+        message_id = getattr(sent, "id", sent)
+        if not isinstance(message_id, int) or isinstance(message_id, bool):
+            return
+        if message_id in self._sent_message_ids:
+            return
+        self._sent_message_ids.add(message_id)
+        self._sent_message_order.append(message_id)
+        while len(self._sent_message_order) > MAX_TRACKED_SENT_MESSAGES:
+            self._sent_message_ids.discard(self._sent_message_order.popleft())
+
+    def _remember_nonce(self, nonce: str) -> None:
+        self._sent_nonces.add(nonce)
+        self._sent_nonce_order.append(nonce)
+        while len(self._sent_nonce_order) > MAX_TRACKED_SENT_MESSAGES:
+            self._sent_nonces.discard(self._sent_nonce_order.popleft())
+
+    async def _send_to_channel(self, channel: Any, content: str, **kwargs: Any) -> Any:
+        """Send through the one central path and record the sent message.
+
+        The gateway echo of our own message can reach ``on_message``
+        before ``send()`` returns its id, so every send carries a nonce
+        that is remembered first; Discord echoes it on MESSAGE_CREATE.
+        """
+        nonce = secrets.token_hex(8)
+        self._remember_nonce(nonce)
+        sent = await channel.send(content, nonce=nonce, **kwargs)
+        self.record_sent_message(sent)
+        return sent
+
+    def _is_ours(self, message: discord.Message) -> bool:
+        """Whether a message from our bot user came from this process.
+
+        Interaction responses and webhook posts are authored by the bot
+        user but never go through ``_send_to_channel``; they are ours too.
+        """
+        if getattr(message, "id", None) in self._sent_message_ids:
+            return True
+        nonce = getattr(message, "nonce", None)
+        if nonce is not None and str(nonce) in self._sent_nonces:
+            return True
+        return (
+            getattr(message, "interaction_metadata", None) is not None
+            or getattr(message, "webhook_id", None) is not None
+        )
+
+    def _is_own_user(self, message: discord.Message) -> bool:
+        if self.user is None:
+            return False
+        if message.author == self.user:
+            return True
+        return getattr(message.author, "id", None) == self.user.id
+
+    def _serves_channel(self, message: discord.Message) -> bool:
+        """Whether this entry serves the channel a message arrived in.
+
+        Mirrors the channel part of ``ConversationRouter.should_respond``
+        without its author check (our own bot user is never an authorized
+        Home Assistant user): DMs when DMs are answered, a configured
+        channel, or a thread whose parent channel is configured.
+        """
+        if isinstance(message.channel, discord.DMChannel):
+            respond_dms = getattr(self.router, "respond_dms", False)
+            return respond_dms is True
+        parent_id = (
+            message.channel.parent_id
+            if isinstance(message.channel, discord.Thread)
+            else None
+        )
+        channels = getattr(self.router, "channels", None)
+        try:
+            if message.channel.id in channels:
+                return True
+            return parent_id is not None and parent_id in channels
+        except TypeError:
+            return False
+
+    def _warn_duplicate_token(self) -> None:
+        """Log once and raise the duplicate-token repair issue."""
+        if self._duplicate_token_warned:
+            return
+        self._duplicate_token_warned = True
+        _LOGGER.warning(
+            "A message from this bot arrived that this process did not "
+            "send; the bot token is probably used somewhere else (the "
+            "Discord Conversation integration, a test bot, or Home "
+            "Assistant's Discord notify integration). A second gateway "
+            "client receives every message and actions may run twice"
+        )
+        entry_id = getattr(self.router, "config_entry_id", None)
+        if entry_id is None or self.hass is None:
+            return
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            issue_id(ISSUE_DUPLICATE_TOKEN, entry_id),
+            is_fixable=False,
+            # A REST-only sender (the notify integration) also trips this,
+            # so the message signal is a warning; a loaded legacy entry
+            # with the same token is raised as an error at setup.
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=ISSUE_DUPLICATE_TOKEN,
+            translation_placeholders={"entry_title": self._entry_title or ""},
+        )
 
     def _set_connected(self, connected: bool) -> None:
         if connected != self.connected:
@@ -301,7 +439,15 @@ class DiscordAssistClient(discord.Client):
                 break
 
     async def on_message(self, message: discord.Message) -> None:
-        if message.author == self.user or message.author.bot:
+        if self._is_own_user(message):
+            # Our own messages are never answered. One we did not send
+            # means another process is running with the same bot token.
+            if self._is_ours(message):
+                return
+            if self._serves_channel(message):
+                self._warn_duplicate_token()
+            return
+        if message.author.bot:
             return
 
         is_dm = isinstance(message.channel, discord.DMChannel)
@@ -389,12 +535,15 @@ class DiscordAssistClient(discord.Client):
         for part in chunk_message(reply):
             try:
                 if reference is not None:
-                    await message.channel.send(
-                        part, reference=reference, mention_author=False
+                    await self._send_to_channel(
+                        message.channel,
+                        part,
+                        reference=reference,
+                        mention_author=False,
                     )
                     reference = None
                 else:
-                    await message.channel.send(part)
+                    await self._send_to_channel(message.channel, part)
             except discord.HTTPException as err:
                 self.recent_errors.record(err, source="send_reply")
                 _LOGGER.warning(
@@ -409,10 +558,13 @@ class DiscordAssistClient(discord.Client):
         reference = message.to_reference(fail_if_not_exists=False)
         try:
             if reference is not None:
-                return await message.channel.send(
-                    PLACEHOLDER_REPLY, reference=reference, mention_author=False
+                return await self._send_to_channel(
+                    message.channel,
+                    PLACEHOLDER_REPLY,
+                    reference=reference,
+                    mention_author=False,
                 )
-            return await message.channel.send(PLACEHOLDER_REPLY)
+            return await self._send_to_channel(message.channel, PLACEHOLDER_REPLY)
         except discord.HTTPException as err:
             self.recent_errors.record(err, source="placeholder")
             _LOGGER.warning(
@@ -450,7 +602,7 @@ class DiscordAssistClient(discord.Client):
             return
         for part in chunks[1:]:
             try:
-                await message.channel.send(part)
+                await self._send_to_channel(message.channel, part)
             except discord.HTTPException as err:
                 self.recent_errors.record(err, source="send_reply")
                 _LOGGER.warning(
