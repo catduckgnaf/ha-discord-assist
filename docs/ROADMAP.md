@@ -222,13 +222,50 @@ Assistant's Device control API as the speaker's own user. Design, transport
 choice (in-process ha-mcp LLM API or MCP client to the app) and open questions
 are in issue #40.
 
+### Decision: role resolution without the Server Members intent (2026-11-15)
+
+Phase A role mapping reads member roles WITHOUT the privileged Server
+Members intent. No privileged intent is required, and none will be asked
+for. Resolution order, implemented in `roles.py` and exposed to the router
+as `role_ids_for`:
+
+1. Roles on the message's own member payload (`message.author.roles`) when
+   the author is a guild member carrying a role list.
+2. `guild.fetch_member(user_id)` on demand when the payload carries no
+   roles, cached for 5 minutes per guild and user so the REST call stays
+   rare.
+
+Rationale: the intent is a Developer Portal toggle that needs review for
+large apps and is one more setup step that can silently break mapping (the
+Message Content intent already needs a repair issue for exactly that
+failure mode). The REST fallback costs at most one call per user per guild
+per cache window, and only when the payload lacks roles; a private home
+server has few users, so the cost is trivial next to the setup and review
+burden of a privileged intent.
+
+Failure fails closed: unresolvable roles mean no role-based profile, never
+a guess. If role mapping is configured but a guild message's roles cannot
+be resolved, the router logs a warning and raises a repair issue (warning
+severity) saying role mapping may not work; the issue registry dedupes it
+per entry, and a later successful resolution clears it.
+
+Remainder: whether MESSAGE_CREATE partial member payloads actually carry
+roles on this bot's gateway setup is not verified here; that test needs the
+live server (issue #37 stays open for it). If payloads turn out to carry no
+roles in practice, the fetch fallback still covers correctness at the
+cached REST cost above. Phase A (#12) wires `role_ids_for` into profile
+assignment in the message path; the resolver, the `role_map` option, and
+role support in `ha_user_for` (user mapping beats role mapping) are in
+place for it.
+
 ### Open questions
 
 - ~~Which agent should Luna run behind?~~ Decided: the bundled agent above (#36, #40).
 - (Original question) Tier 3 needs an agent that supports Home
   Assistant LLM APIs; Extended OpenAI Conversation does not.
-- Discord roles need the Server Members intent to read member roles reliably.
-  It is a privileged intent; acceptable for a private server.
+- ~~Discord roles need the Server Members intent to read member roles reliably.~~
+  Decided: no privileged intent; payload roles first, `fetch_member` on
+  demand with a brief cache. See the decision above (#37).
 - Should profiles also restrict which conversation history a user can see in
   shared channels?
 

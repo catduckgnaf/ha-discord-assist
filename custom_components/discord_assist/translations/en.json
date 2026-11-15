@@ -131,6 +131,10 @@
     "message_content_intent": {
       "title": "{entry_title} needs the Message Content intent",
       "description": "Discord refused the gateway connection because the bot does not have the Message Content privileged intent. Enable it under Bot > Privileged Gateway Intents in the Discord Developer Portal, then reload the integration."
+    },
+    "role_resolution": {
+      "title": "Discord role mapping may not work",
+      "description": "Discord Assist maps Discord roles to Home Assistant users for this entry, but it could not read a server member's roles. Role-based mapping fails closed, so those users are treated as unmapped until roles can be read. Check that the bot can see the server and its members, then reload the integration."
     }
   }
 }

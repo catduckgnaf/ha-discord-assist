@@ -141,11 +141,12 @@ def test_from_entry_skips_non_numeric_allowlist_and_user_map():
     from types import SimpleNamespace
 
     entry = SimpleNamespace(
+        entry_id="entry-1",
         options={
             CONF_AGENT_ID: "conversation.ollama",
             CONF_ALLOWLIST: ["123456789", "not-a-number", "987654321"],
             CONF_USER_MAP: {"111": "ha-user-a", "bad-key": "ha-user-b"},
-        }
+        },
     )
     hass = object()
     router = ConversationRouter.from_entry(hass, entry)
@@ -357,12 +358,13 @@ async def test_speaker_context_off_sends_no_prompt():
 
 def test_from_entry_reads_new_options():
     entry = SimpleNamespace(
+        entry_id="entry-1",
         options={
             CONF_AGENT_ID: "conversation.ollama",
             CONF_ROOM_MAP: {"111": "dev-den", "bad": "x"},
             CONF_PREFER_LOCAL: True,
             CONF_AGENT_TIMEOUT: 30,
-        }
+        },
     )
     router = ConversationRouter.from_entry(object(), entry)
     assert router.room_map == {111: "dev-den"}
