@@ -244,13 +244,21 @@ class ConversationRouter:
         discord_user_id: int,
         conversation_key: str,
         where: MessageContext | None = None,
+        rate_checked: bool = False,
     ) -> str:
+        """Run one authorized turn through the conversation agent.
+
+        ``rate_checked`` is True when the caller already consumed this
+        request's rate-limit token (the message path throttles before it
+        starts typing); otherwise the limit is enforced here.
+        """
         ha_user_id = self.ha_user_for(discord_user_id)
         if ha_user_id is None:
             raise PermissionError(f"Discord user {discord_user_id} is not authorized")
-        decision = self.check_rate_limit(discord_user_id)
-        if not decision.allowed:
-            raise RateLimited(decision.should_notify)
+        if not rate_checked:
+            decision = self.check_rate_limit(discord_user_id)
+            if not decision.allowed:
+                raise RateLimited(decision.should_notify)
         where = where or MessageContext()
         context = Context(user_id=ha_user_id)
         device_id = self.device_for(where.channel_id, where.parent_id)

@@ -25,6 +25,9 @@ class ConversationCache:
         self._now = now
         self._store: dict[str, tuple[str, datetime]] = {}
 
+    def __len__(self) -> int:
+        return len(self._store)
+
     def get(self, key: str) -> str | None:
         # Eviction is lazy (only on access) by design: inactive keys persist until
         # next access, which is acceptable at home scale.

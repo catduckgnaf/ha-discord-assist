@@ -22,6 +22,7 @@ CONF_FALLBACK_USER = "fallback_ha_user"
 CONF_SPEAKER_CONTEXT = "speaker_context"
 CONF_PREFER_LOCAL = "prefer_local"
 CONF_AGENT_TIMEOUT = "agent_timeout"
+CONF_PLACEHOLDER_DELAY = "placeholder_delay"
 CONF_ROOM_MAP = "room_map"
 CONF_RATE_LIMIT_PER_MINUTE = "rate_limit_per_minute"
 CONF_RATE_LIMIT_BURST = "rate_limit_burst"
@@ -34,6 +35,7 @@ DEFAULT_PREFER_LOCAL = False
 DEFAULT_AGENT_TIMEOUT = 60
 DEFAULT_RATE_LIMIT_PER_MINUTE = 10
 DEFAULT_RATE_LIMIT_BURST = 3
+DEFAULT_PLACEHOLDER_DELAY = 3.0
 
 # Home Assistant's built-in intent agent, tried first when prefer_local is on.
 LOCAL_AGENT_ID = "conversation.home_assistant"
