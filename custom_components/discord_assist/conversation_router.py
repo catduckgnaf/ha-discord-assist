@@ -5,14 +5,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import timedelta
+from typing import Any
 
 from homeassistant.components.conversation import ConversationResult, async_converse
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.intent import IntentResponseErrorCode, IntentResponseType
 from homeassistant.util import dt as dt_util
 
@@ -27,6 +30,7 @@ from .const import (
     CONF_PREFER_LOCAL,
     CONF_RESPOND_DMS,
     CONF_RESPOND_MENTIONS,
+    CONF_ROLE_MAP,
     CONF_ROOM_MAP,
     CONF_SPEAKER_CONTEXT,
     CONF_USER_MAP,
@@ -36,9 +40,13 @@ from .const import (
     DEFAULT_RESPOND_DMS,
     DEFAULT_RESPOND_MENTIONS,
     DEFAULT_SPEAKER_CONTEXT,
+    DOMAIN,
+    ISSUE_ROLE_RESOLUTION,
     LOCAL_AGENT_ID,
+    issue_id,
 )
 from .conversation_cache import ConversationCache, TurnLocks
+from .roles import RoleResolver
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -134,10 +142,14 @@ class ConversationRouter:
     fallback_user: str | None
     cache: ConversationCache
     room_map: dict[int, str] = field(default_factory=dict)
+    role_map: dict[int, str] = field(default_factory=dict)
+    entry_id: str | None = None
+    role_resolver: RoleResolver = field(default_factory=RoleResolver)
     speaker_context: bool = DEFAULT_SPEAKER_CONTEXT
     prefer_local: bool = DEFAULT_PREFER_LOCAL
     agent_timeout: float = DEFAULT_AGENT_TIMEOUT
     turns: TurnLocks = field(default_factory=TurnLocks)
+    _role_issue_reported: bool = field(default=False, init=False, repr=False)
 
     @property
     def has_authorized_users(self) -> bool:
@@ -146,19 +158,79 @@ class ConversationRouter:
             bool(self.allowlist) and self.fallback_user is not None
         )
 
-    def ha_user_for(self, discord_user_id: int) -> str | None:
+    @property
+    def role_mapping_configured(self) -> bool:
+        """Whether any Discord role is mapped to an HA user in the options."""
+        return bool(self.role_map)
+
+    def ha_user_for(
+        self, discord_user_id: int, role_ids: Iterable[int] | None = None
+    ) -> str | None:
         """HA user a Discord user acts as, or None if they may not use the bot.
 
         Fails closed: a Discord user must be mapped or allowlisted, and must
         resolve to a real HA user. Nobody ever gets an identity-less Context,
         which Home Assistant treats as unrestricted.
+
+        Resolution order: an explicit user mapping beats a role mapping
+        (``role_ids`` from :meth:`role_ids_for`), which beats the
+        allowlist-plus-fallback path.
         """
-        if (
-            discord_user_id not in self.user_map
-            and discord_user_id not in self.allowlist
-        ):
+        if discord_user_id in self.user_map:
+            return resolve_ha_user_id(
+                self.user_map, self.fallback_user, discord_user_id
+            )
+        if role_ids:
+            for role_id in role_ids:
+                ha_user = self.role_map.get(role_id)
+                if ha_user:
+                    return ha_user
+        if discord_user_id not in self.allowlist:
             return None
         return resolve_ha_user_id(self.user_map, self.fallback_user, discord_user_id)
+
+    async def role_ids_for(self, *, author: Any, guild: Any) -> frozenset[int]:
+        """Role ids for a message author, resolved per the #37 decision.
+
+        Payload roles first, ``guild.fetch_member`` on demand with a brief
+        cache; no privileged Server Members intent is required (see
+        ``roles.py``). Fails closed: unresolvable roles come back empty. When
+        role mapping is configured but a guild message's roles cannot be
+        resolved at all, this logs a warning and raises the role-resolution
+        repair issue for this entry (the registry dedupes repeats, and a
+        later successful resolution clears it).
+        """
+        resolution = await self.role_resolver.resolve(author=author, guild=guild)
+        if resolution.resolved:
+            if self._role_issue_reported:
+                self._set_role_issue(False)
+        elif self.role_mapping_configured:
+            _LOGGER.warning(
+                "Role mapping is configured but roles could not be resolved "
+                "for Discord user %s; role-based mapping will not apply",
+                author.id,
+            )
+            self._set_role_issue(True)
+        return resolution.role_ids
+
+    def _set_role_issue(self, active: bool) -> None:
+        """Raise or clear this entry's role-resolution repair issue."""
+        if self.entry_id is None:
+            return
+        if active:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                issue_id(ISSUE_ROLE_RESOLUTION, self.entry_id),
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=ISSUE_ROLE_RESOLUTION,
+            )
+        else:
+            ir.async_delete_issue(
+                self.hass, DOMAIN, issue_id(ISSUE_ROLE_RESOLUTION, self.entry_id)
+            )
+        self._role_issue_reported = active
 
     def device_for(self, channel_id: int | None, parent_id: int | None) -> str | None:
         """Device standing in for the room a channel (or its thread) represents."""
@@ -304,6 +376,8 @@ class ConversationRouter:
                 timedelta(minutes=opts.get(CONF_IDLE_MINUTES, DEFAULT_IDLE_MINUTES))
             ),
             room_map=_coerce_int_keys(opts.get(CONF_ROOM_MAP), "room channel id"),
+            role_map=_coerce_int_keys(opts.get(CONF_ROLE_MAP), "Discord role id"),
+            entry_id=entry.entry_id,
             speaker_context=opts.get(CONF_SPEAKER_CONTEXT, DEFAULT_SPEAKER_CONTEXT),
             prefer_local=opts.get(CONF_PREFER_LOCAL, DEFAULT_PREFER_LOCAL),
             agent_timeout=float(opts.get(CONF_AGENT_TIMEOUT, DEFAULT_AGENT_TIMEOUT)),

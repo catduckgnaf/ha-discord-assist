@@ -20,6 +20,7 @@ from .const import (
     DOMAIN,
     ISSUE_MESSAGE_CONTENT_INTENT,
     ISSUE_NO_AUTHORIZED_USERS,
+    ISSUE_ROLE_RESOLUTION,
     RECONNECT_DELAY,
     issue_id,
     signal_connection,
@@ -124,5 +125,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Clean up repair issues when the entry is deleted."""
-    for kind in (ISSUE_NO_AUTHORIZED_USERS, ISSUE_MESSAGE_CONTENT_INTENT):
+    for kind in (
+        ISSUE_NO_AUTHORIZED_USERS,
+        ISSUE_MESSAGE_CONTENT_INTENT,
+        ISSUE_ROLE_RESOLUTION,
+    ):
         ir.async_delete_issue(hass, DOMAIN, issue_id(kind, entry.entry_id))
