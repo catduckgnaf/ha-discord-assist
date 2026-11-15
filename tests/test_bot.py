@@ -15,6 +15,7 @@ def _message(
     mentions=None,
     channel_id=111,
     parent_id=None,
+    message_id=4242,
 ):
     if is_dm:
         channel = MagicMock(spec=discord.DMChannel)
@@ -24,12 +25,14 @@ def _message(
     else:
         channel = MagicMock(spec=discord.TextChannel)
     channel.id = channel_id
+    channel.name = "general"
     channel.send = AsyncMock()
     typing_cm = MagicMock()
     typing_cm.__aenter__ = AsyncMock()
     typing_cm.__aexit__ = AsyncMock(return_value=False)
     channel.typing = MagicMock(return_value=typing_cm)
     msg = SimpleNamespace(
+        id=message_id,
         content=content,
         channel=channel,
         author=SimpleNamespace(id=7, bot=author_bot, display_name="Catduck"),
@@ -44,10 +47,22 @@ def _first_send(msg):
     return msg.channel.send.await_args_list[0]
 
 
-def _client(router, monkeypatch):
+def _hass():
+    return SimpleNamespace(bus=SimpleNamespace(async_fire=MagicMock()))
+
+
+def _client(router, monkeypatch, **kwargs):
+    # A MagicMock router answers every attribute; pin the event-related
+    # ones to realistic values unless the test set them explicitly.
+    if isinstance(router, MagicMock):
+        if isinstance(router.ha_user_for.return_value, MagicMock):
+            router.ha_user_for.return_value = "ha-a"
+        router.event_exclude_text = False
+        router.config_entry_id = "entry-123"
+    kwargs.setdefault("config_entry_id", "entry-123")
     with patch("discord.Client.__init__", return_value=None):
         client = DiscordAssistClient(
-            hass=object(), router=router, status_signal="test_signal"
+            hass=_hass(), router=router, status_signal="test_signal", **kwargs
         )
     # discord.Client.user is normally read-only; stub it for tests
     monkeypatch.setattr(
@@ -220,3 +235,129 @@ async def test_dm_has_no_channel_name(monkeypatch):
     client = _client(router, monkeypatch)
     await client.on_message(_message("hello", is_dm=True))
     assert router.process.call_args.kwargs["where"].channel_name is None
+
+
+async def test_accepted_message_fires_event_once_with_fields(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.process = AsyncMock(return_value="hi")
+    client = _client(router, monkeypatch)
+    msg = _message("<@999> movie time", mentions=[SimpleNamespace(id=999)])
+    await client.on_message(msg)
+    client.hass.bus.async_fire.assert_called_once()
+    event_type, data = client.hass.bus.async_fire.call_args.args
+    context = client.hass.bus.async_fire.call_args.kwargs["context"]
+    assert event_type == "discord_assist_message"
+    assert data == {
+        "text": "movie time",
+        "channel_id": 111,
+        "channel_name": "general",
+        "is_dm": False,
+        "discord_user_id": 7,
+        "ha_user_id": "ha-a",
+        "message_id": 4242,
+        "config_entry_id": "entry-123",
+    }
+    assert context.user_id == "ha-a"
+    router.ha_user_for.assert_called_with(7)
+
+
+async def test_rejected_message_fires_no_event(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = False
+    router.process = AsyncMock()
+    client = _client(router, monkeypatch)
+    await client.on_message(_message("random channel chatter"))
+    client.hass.bus.async_fire.assert_not_called()
+    router.process.assert_not_called()
+
+
+async def test_unmapped_user_fires_no_event(monkeypatch):
+    """should_respond passing is not enough: no HA identity, no event."""
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.ha_user_for.return_value = None
+    router.process = AsyncMock(return_value="hi")
+    client = _client(router, monkeypatch)
+    await client.on_message(_message("hello"))
+    client.hass.bus.async_fire.assert_not_called()
+
+
+async def test_event_exclude_text_option_omits_text(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.process = AsyncMock(return_value="hi")
+    client = _client(router, monkeypatch, event_exclude_text=True)
+    await client.on_message(_message("secret words"))
+    client.hass.bus.async_fire.assert_called_once()
+    data = client.hass.bus.async_fire.call_args.args[1]
+    assert "text" not in data
+    assert data["ha_user_id"] == "ha-a"
+    assert data["channel_id"] == 111
+
+
+async def test_dm_event_has_no_channel_name(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.process = AsyncMock(return_value="hi")
+    client = _client(router, monkeypatch)
+    await client.on_message(_message("hello", is_dm=True))
+    data = client.hass.bus.async_fire.call_args.args[1]
+    assert data["is_dm"] is True
+    assert data["channel_name"] is None
+
+
+async def test_accepted_message_fires_event_on_real_bus(hass, monkeypatch):
+    """End to end on a real HA bus: one event, carrying the HA identity."""
+    from datetime import timedelta
+
+    from custom_components.discord_assist.const import EVENT_MESSAGE
+    from custom_components.discord_assist.conversation_cache import ConversationCache
+    from custom_components.discord_assist.conversation_router import (
+        ConversationRouter,
+    )
+
+    router = ConversationRouter(
+        hass=hass,
+        agent_id="conversation.ollama",
+        language=None,
+        channels={111},
+        respond_dms=True,
+        respond_mentions=True,
+        allowlist=set(),
+        user_map={7: "ha-a"},
+        fallback_user=None,
+        cache=ConversationCache(timedelta(minutes=15)),
+        speaker_context=False,
+        config_entry_id="entry-real",
+    )
+    router.process = AsyncMock(return_value="hi")
+    events = []
+    hass.bus.async_listen(EVENT_MESSAGE, lambda event: events.append(event))
+    with patch("discord.Client.__init__", return_value=None):
+        client = DiscordAssistClient(
+            hass=hass, router=router, status_signal="test_signal"
+        )
+    monkeypatch.setattr(
+        type(client), "user", property(lambda self: SimpleNamespace(id=999))
+    )
+    assert client.config_entry_id == "entry-real"
+    await client.on_message(_message("movie time"))
+    await hass.async_block_till_done()
+    assert len(events) == 1
+    assert events[0].event_type == EVENT_MESSAGE
+    assert events[0].data["text"] == "movie time"
+    assert events[0].data["config_entry_id"] == "entry-real"
+    assert events[0].context.user_id == "ha-a"
+
+
+def test_client_falls_back_to_router_config_entry_id(monkeypatch):
+    router = MagicMock()
+    router.config_entry_id = "entry-from-router"
+    router.event_exclude_text = True
+    with patch("discord.Client.__init__", return_value=None):
+        client = DiscordAssistClient(
+            hass=_hass(), router=router, status_signal="test_signal"
+        )
+    assert client.config_entry_id == "entry-from-router"
+    assert client.event_exclude_text is True

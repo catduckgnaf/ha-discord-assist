@@ -70,7 +70,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
     _set_issue(hass, entry, ISSUE_NO_AUTHORIZED_USERS, not router.has_authorized_users)
     _set_issue(hass, entry, ISSUE_MESSAGE_CONTENT_INTENT, False)
 
-    client = DiscordAssistClient(hass, router, signal_connection(entry.entry_id))
+    client = DiscordAssistClient(
+        hass,
+        router,
+        signal_connection(entry.entry_id),
+        config_entry_id=entry.entry_id,
+        event_exclude_text=router.event_exclude_text,
+    )
     # Log in over REST first so a dead network or bad token surfaces here,
     # where Home Assistant retries with backoff or starts reauth.
     try:

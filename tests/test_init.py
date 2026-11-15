@@ -70,6 +70,29 @@ async def test_setup_and_unload(hass: HomeAssistant):
         fake_client.close.assert_awaited()
 
 
+async def test_setup_threads_entry_id_and_event_option_to_client(
+    hass: HomeAssistant,
+):
+    entry = _entry(
+        options={
+            CONF_AGENT_ID: "conversation.ollama",
+            CONF_USER_MAP: {"7": "ha-a"},
+            "event_exclude_text": True,
+        }
+    )
+    entry.add_to_hass(hass)
+    fake_client = _fake_client()
+
+    with patch(CLIENT, return_value=fake_client) as mock_client:
+        assert await hass.config_entries.async_setup(entry.entry_id) is True
+        await hass.async_block_till_done()
+    kwargs = mock_client.call_args.kwargs
+    assert kwargs["config_entry_id"] == entry.entry_id
+    assert kwargs["event_exclude_text"] is True
+    assert entry.runtime_data.router.config_entry_id == entry.entry_id
+    assert entry.runtime_data.router.event_exclude_text is True
+
+
 async def test_login_failure_triggers_reauth(hass: HomeAssistant):
     entry = _entry()
     entry.add_to_hass(hass)
