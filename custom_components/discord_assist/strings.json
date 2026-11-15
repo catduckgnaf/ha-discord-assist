@@ -21,6 +21,7 @@
           "allowlist": "Allowed Discord user IDs (act as the fallback user; mapped users are always allowed)",
           "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
           "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
+          "timer_mention": "Mention the Discord user who set a timer when it finishes",
           "agent_timeout": "Give up on the agent after this many seconds"
         }
       },
@@ -81,6 +82,7 @@
           "fallback_ha_user": "Fallback Home Assistant user for unmapped Discord users",
           "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
           "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
+          "timer_mention": "Mention the Discord user who set a timer when it finishes",
           "agent_timeout": "Give up on the agent after this many seconds"
         }
       },

@@ -23,6 +23,7 @@ CONF_SPEAKER_CONTEXT = "speaker_context"
 CONF_PREFER_LOCAL = "prefer_local"
 CONF_AGENT_TIMEOUT = "agent_timeout"
 CONF_ROOM_MAP = "room_map"
+CONF_TIMER_MENTION = "timer_mention"
 
 DEFAULT_RESPOND_DMS = True
 DEFAULT_RESPOND_MENTIONS = True
@@ -30,6 +31,7 @@ DEFAULT_IDLE_MINUTES = 15
 DEFAULT_SPEAKER_CONTEXT = True
 DEFAULT_PREFER_LOCAL = False
 DEFAULT_AGENT_TIMEOUT = 60
+DEFAULT_TIMER_MENTION = False
 
 # Home Assistant's built-in intent agent, tried first when prefer_local is on.
 LOCAL_AGENT_ID = "conversation.home_assistant"

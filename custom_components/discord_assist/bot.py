@@ -97,6 +97,36 @@ class DiscordAssistClient(discord.Client):
             _LOGGER.exception("Conversation processing failed")
         await self._send_reply(message, reply or EMPTY_REPLY)
 
+    async def send_timer_message(
+        self, channel_id: int, text: str, mention_user_id: int | None
+    ) -> None:
+        """Post a timer announcement in a channel.
+
+        The mention is the single explicit opt-in exception to the client's
+        no-mentions default: only the user who set the timer is mentioned,
+        and only when the caller passes their id (the timer_mention option).
+        """
+        channel = self.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(channel_id)
+            except discord.HTTPException:
+                _LOGGER.warning(
+                    "Could not find channel %s for a timer announcement", channel_id
+                )
+                return
+        if mention_user_id is not None:
+            allowed_mentions = discord.AllowedMentions(
+                everyone=False,
+                roles=False,
+                users=[discord.Object(id=mention_user_id)],
+                replied_user=False,
+            )
+            text = f"<@{mention_user_id}> {text}"
+        else:
+            allowed_mentions = discord.AllowedMentions.none()
+        await channel.send(text, allowed_mentions=allowed_mentions)
+
     async def _send_reply(self, message: discord.Message, reply: str) -> None:
         """First piece replies to the message (no ping); the rest follow it.
 

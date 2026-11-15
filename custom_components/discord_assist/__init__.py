@@ -8,11 +8,14 @@ from dataclasses import dataclass
 
 import aiohttp
 import discord
+from homeassistant.components.intent import async_register_timer_handler
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.device_registry import DeviceEntryType
 
 from .bot import DiscordAssistClient
 from .const import (
@@ -25,6 +28,7 @@ from .const import (
     signal_connection,
 )
 from .conversation_router import ConversationRouter
+from .timers import TimerTracker
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +41,8 @@ class RuntimeData:
 
     client: DiscordAssistClient
     router: ConversationRouter
+    device_id: str
+    timers: TimerTracker
 
 
 type DiscordConfigEntry = ConfigEntry[RuntimeData]
@@ -60,7 +66,22 @@ def _set_issue(hass: HomeAssistant, entry: ConfigEntry, kind: str, active: bool)
 
 async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> bool:
     """Set up Discord Assist from a config entry."""
+    # The integration's own device for this entry (the same device the
+    # gateway sensor attaches to). Channels that are not mapped to a room
+    # send their requests as this device, and its registered timer handler
+    # is what makes Assist timers work for those channels. It is not
+    # assigned to an area: an unmapped channel has no knowable room, and
+    # room-mapped channels keep using their room device instead.
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, str(entry.unique_id))},
+        name=entry.title,
+        manufacturer="Discord",
+        entry_type=DeviceEntryType.SERVICE,
+    )
+
     router = ConversationRouter.from_entry(hass, entry)
+    router.integration_device_id = device.id
     if not router.has_authorized_users:
         _LOGGER.warning(
             "No Discord users are authorized for %s; the bot will ignore everyone "
@@ -82,7 +103,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         await client.close()
         raise ConfigEntryNotReady(f"Could not reach Discord: {err}") from err
 
-    entry.runtime_data = RuntimeData(client=client, router=router)
+    timers = TimerTracker(
+        hass, client.send_timer_message, timer_mention=router.timer_mention
+    )
+    router.timer_tracker = timers
+    try:
+        entry.async_on_unload(
+            async_register_timer_handler(hass, device.id, timers.handle_event)
+        )
+    except KeyError:
+        # The intent component provides the timer manager; it is a declared
+        # dependency, so this should not happen, but timers failing must not
+        # take the whole entry down with them.
+        _LOGGER.warning(
+            "Timer manager is not available for %s; Assist timers are disabled",
+            entry.title,
+        )
+
+    entry.runtime_data = RuntimeData(
+        client=client, router=router, device_id=device.id, timers=timers
+    )
 
     async def _run() -> None:
         try:

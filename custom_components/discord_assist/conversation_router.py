@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import timedelta
 
@@ -29,6 +30,7 @@ from .const import (
     CONF_RESPOND_MENTIONS,
     CONF_ROOM_MAP,
     CONF_SPEAKER_CONTEXT,
+    CONF_TIMER_MENTION,
     CONF_USER_MAP,
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_IDLE_MINUTES,
@@ -36,9 +38,11 @@ from .const import (
     DEFAULT_RESPOND_DMS,
     DEFAULT_RESPOND_MENTIONS,
     DEFAULT_SPEAKER_CONTEXT,
+    DEFAULT_TIMER_MENTION,
     LOCAL_AGENT_ID,
 )
 from .conversation_cache import ConversationCache, TurnLocks
+from .timers import TimerOrigin, TimerTracker
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -138,6 +142,13 @@ class ConversationRouter:
     prefer_local: bool = DEFAULT_PREFER_LOCAL
     agent_timeout: float = DEFAULT_AGENT_TIMEOUT
     turns: TurnLocks = field(default_factory=TurnLocks)
+    # The integration's own per-entry device. Channels that are not mapped
+    # to a room pass this device so Assist timer intents work there (it has
+    # the registered timer handler); room-mapped channels keep their room
+    # device, so room preference still applies in those channels.
+    integration_device_id: str | None = None
+    timer_mention: bool = DEFAULT_TIMER_MENTION
+    timer_tracker: TimerTracker | None = None
 
     @property
     def has_authorized_users(self) -> bool:
@@ -161,12 +172,17 @@ class ConversationRouter:
         return resolve_ha_user_id(self.user_map, self.fallback_user, discord_user_id)
 
     def device_for(self, channel_id: int | None, parent_id: int | None) -> str | None:
-        """Device standing in for the room a channel (or its thread) represents."""
+        """Device a channel's requests are sent as.
+
+        A room-mapped channel (or a thread in one) uses its room device.
+        Anything else falls back to the integration's own device, which is
+        what makes Assist timers work in unmapped channels and DMs.
+        """
         if channel_id in self.room_map:
             return self.room_map[channel_id]
-        if parent_id is not None:
-            return self.room_map.get(parent_id)
-        return None
+        if parent_id is not None and parent_id in self.room_map:
+            return self.room_map[parent_id]
+        return self.integration_device_id
 
     def should_respond(
         self,
@@ -203,7 +219,23 @@ class ConversationRouter:
         context = Context(user_id=ha_user_id)
         device_id = self.device_for(where.channel_id, where.parent_id)
 
-        async with self.turns.hold(conversation_key):
+        # While this request is in flight, a timer started on the
+        # integration device belongs to this channel and user; the timer
+        # handler correlates it through the tracker (see timers.py).
+        tracking = nullcontext()
+        if (
+            self.timer_tracker is not None
+            and device_id is not None
+            and device_id == self.integration_device_id
+            and where.channel_id is not None
+        ):
+            tracking = self.timer_tracker.track_request(
+                TimerOrigin(
+                    channel_id=where.channel_id, discord_user_id=discord_user_id
+                )
+            )
+
+        async with tracking, self.turns.hold(conversation_key):
             try:
                 async with asyncio.timeout(self.agent_timeout):
                     return await self._converse(
@@ -307,4 +339,5 @@ class ConversationRouter:
             speaker_context=opts.get(CONF_SPEAKER_CONTEXT, DEFAULT_SPEAKER_CONTEXT),
             prefer_local=opts.get(CONF_PREFER_LOCAL, DEFAULT_PREFER_LOCAL),
             agent_timeout=float(opts.get(CONF_AGENT_TIMEOUT, DEFAULT_AGENT_TIMEOUT)),
+            timer_mention=opts.get(CONF_TIMER_MENTION, DEFAULT_TIMER_MENTION),
         )

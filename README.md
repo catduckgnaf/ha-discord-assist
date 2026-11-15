@@ -109,7 +109,14 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for what is planned to make this easier.
 | Allowed Discord user IDs | (none) | Discord user IDs allowed to use the bot as the fallback user; mapped users are always allowed |
 | Speaker context | Yes | Sends the agent the speaker's Discord name and Home Assistant user, the channel, the room (for room channels), and the local time, as extra system prompt text. Agents that ignore extra prompt text are unaffected |
 | Built-in commands first | No | Tries `conversation.home_assistant` first and only asks your agent when the built-in agent does not understand the request or finds no matching device. A command it matched but failed is not retried, so nothing runs twice |
+| Timer mention | No | Mentions the Discord user who set a timer when that timer finishes. Off by default: finished timers are announced in the channel without mentioning anyone |
 | Agent timeout | 60 s | Gives up and says so instead of typing forever |
+
+## Timers
+
+"Set a 5 minute timer" works in any channel the bot answers in. Home Assistant's timer intents need a device with a registered timer handler, so each Discord Assist entry has its own device in the device registry, and channels that are not mapped to a room send their requests as that device. When a timer finishes, the bot posts in the channel where it was set (for example "Kitchen timer done"). With the **Timer mention** option on, that post also mentions the Discord user who set the timer; it is the only mention the bot makes, and it is off by default.
+
+Room channels are the exception: they keep sending their room device, so room preference still applies there. A timer set in a room channel is handled by that device's own timer handler if it has one (a voice satellite, for example); the integration device is not assigned to a room area, because an unmapped channel has no knowable room.
 
 ## Room channels
 
