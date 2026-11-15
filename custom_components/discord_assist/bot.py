@@ -14,6 +14,7 @@ from .conversation_router import (
     MessageContext,
     make_conversation_key,
 )
+from .recent_errors import RecentErrors
 from .text_utils import chunk_message, strip_self_mention
 
 _LOGGER = logging.getLogger(__name__)
@@ -27,7 +28,11 @@ class DiscordAssistClient(discord.Client):
     """Listens for messages and routes them to the HA conversation agent."""
 
     def __init__(
-        self, hass: HomeAssistant, router: ConversationRouter, status_signal: str
+        self,
+        hass: HomeAssistant,
+        router: ConversationRouter,
+        status_signal: str,
+        recent_errors: RecentErrors | None = None,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -38,6 +43,9 @@ class DiscordAssistClient(discord.Client):
         )
         self.hass = hass
         self.router = router
+        self.recent_errors = (
+            recent_errors if recent_errors is not None else RecentErrors()
+        )
         self.connected = False
         self._status_signal = status_signal
 
@@ -91,9 +99,11 @@ class DiscordAssistClient(discord.Client):
         reply = ERROR_REPLY
         try:
             reply = await self._answer(message, text, key, where)
-        except AgentTimeout:
+        except AgentTimeout as err:
+            self.recent_errors.record(err, source="on_message")
             reply = TIMEOUT_REPLY
-        except Exception:  # noqa: BLE001 - never let the gateway die
+        except Exception as err:  # noqa: BLE001 - never let the gateway die
+            self.recent_errors.record(err, source="on_message")
             _LOGGER.exception("Conversation processing failed")
         await self._send_reply(message, reply or EMPTY_REPLY)
 
@@ -113,7 +123,8 @@ class DiscordAssistClient(discord.Client):
                     reference = None
                 else:
                     await message.channel.send(part)
-            except discord.HTTPException:
+            except discord.HTTPException as err:
+                self.recent_errors.record(err, source="send_reply")
                 _LOGGER.warning(
                     "Failed to send reply to channel %s", message.channel.id
                 )
