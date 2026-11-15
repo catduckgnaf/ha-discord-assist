@@ -131,6 +131,10 @@
     "message_content_intent": {
       "title": "{entry_title} needs the Message Content intent",
       "description": "Discord refused the gateway connection because the bot does not have the Message Content privileged intent. Enable it under Bot > Privileged Gateway Intents in the Discord Developer Portal, then reload the integration."
+    },
+    "duplicate_token": {
+      "title": "{entry_title} bot token is also running elsewhere",
+      "description": "A message from this bot was seen that this Home Assistant instance did not send, or a Discord Conversation entry with the same bot token is loaded. That means the same bot token is running in another process, such as the old Discord Conversation integration or a test bot. Both processes receive every message, both may answer, and actions may run twice. Stop the other process, or disable or remove the entry that uses the same token, then reload this integration."
     }
   }
 }
