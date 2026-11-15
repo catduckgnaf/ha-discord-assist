@@ -1,0 +1,77 @@
+send_message:
+  name: Send message
+  description: Send a message to a Discord channel or user through a loaded Discord Assist entry. Optionally returns the ID of the message carrying the buttons as response data.
+  fields:
+    config_entry_id:
+      name: Config entry
+      description: The Discord Assist config entry whose bot sends the message.
+      required: true
+      selector:
+        config_entry:
+          integration: discord_assist
+    target:
+      name: Target
+      description: Discord channel ID to post to, or Discord user ID to open a direct message with.
+      required: true
+      example: "123456789012345678"
+      selector:
+        text:
+    message:
+      name: Message
+      description: Message text to send. Long messages are split into chunks automatically.
+      required: true
+      selector:
+        text:
+          multiline: true
+    image:
+      name: Image
+      description: Optional camera entity ID (for example camera.front_door) or a path to an image file in an allowed directory.
+      required: false
+      example: "camera.front_door"
+      selector:
+        text:
+    buttons:
+      name: Buttons
+      description: Optional list of up to 25 buttons, each with an id (the action a discord_assist_action event reports), a label, and optionally a style (primary, secondary, success, or danger), allowed_discord_user_ids, multi_use, and entity_ids whose state is re-checked on press.
+      required: false
+      example:
+        - id: "approve"
+          label: "Approve"
+          style: "primary"
+      selector:
+        object:
+retire_message:
+  name: Retire message
+  description: >-
+    Remove the buttons from a tracked Discord button message, strike through
+    its headline, and optionally append an outcome line. Use this from an
+    automation when the alert the message offered is no longer valid.
+  fields:
+    config_entry_id:
+      name: Config entry
+      description: The Discord Assist config entry that sent the message.
+      required: true
+      selector:
+        config_entry:
+          integration: discord_assist
+    channel_id:
+      name: Channel ID
+      description: The Discord channel the button message is in.
+      required: true
+      example: "123456789012345678"
+      selector:
+        text:
+    message_id:
+      name: Message ID
+      description: The Discord message to retire.
+      required: true
+      example: "1234567890123456789"
+      selector:
+        text:
+    outcome:
+      name: Outcome
+      description: Optional line appended to the message, for example "Unlocked by Andrew".
+      required: false
+      example: "Unlocked by Andrew"
+      selector:
+        text:
