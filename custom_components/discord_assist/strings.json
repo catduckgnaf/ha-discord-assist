@@ -114,7 +114,7 @@
       },
       "remove_note": {
         "title": "Standing preferences (notes)",
-        "description": "Every saved note is listed with its Discord user ID and number. Picking one removes it. Notes are added from Discord with 'remember: <note>'.",
+        "description": "Every saved note is listed with its Discord user ID and number. Picking one removes it. Notes are added from Discord by sending a remember message.",
         "data": {
           "note_key": "Note to remove"
         }
