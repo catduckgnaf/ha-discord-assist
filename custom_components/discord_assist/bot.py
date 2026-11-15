@@ -17,6 +17,7 @@ from .conversation_router import (
     AgentTimeout,
     ConversationRouter,
     MessageContext,
+    RateLimited,
     make_conversation_key,
 )
 from .recent_errors import RecentErrors
@@ -27,6 +28,9 @@ _LOGGER = logging.getLogger(__name__)
 ERROR_REPLY = "Sorry, I hit an error talking to Home Assistant."
 EMPTY_REPLY = "(no response)"
 TIMEOUT_REPLY = "Sorry, Home Assistant took too long to answer. Try again?"
+RATE_LIMIT_REPLY = (
+    "Slow down: you are sending requests too quickly. Please wait a bit and try again."
+)
 PLACEHOLDER_REPLY = "Working on it..."
 UNAUTHORIZED_REPLY = "Sorry, you are not authorized to use this bot."
 
@@ -202,6 +206,12 @@ class DiscordAssistClient(discord.Client):
         async with acknowledged(interaction, thinking=True):
             try:
                 await self.handle_interaction(interaction)
+            except RateLimited as err:
+                # The interaction is already deferred, so it needs an answer;
+                # repeat refusals in the window get a bare one.
+                await self._edit_interaction_reply(
+                    interaction, RATE_LIMIT_REPLY if err.should_notify else "..."
+                )
             except AgentTimeout:
                 await self._edit_interaction_reply(interaction, TIMEOUT_REPLY)
             except Exception:  # noqa: BLE001 - never let the gateway die
@@ -323,6 +333,14 @@ class DiscordAssistClient(discord.Client):
             channel_id=message.channel.id,
             parent_id=parent_id,
         )
+        # Throttle before typing, the placeholder or any agent work, so a
+        # refused request costs nothing: one "Slow down" notice per
+        # throttle window, then silence.
+        decision = self.router.check_rate_limit(message.author.id)
+        if not decision.allowed:
+            if decision.should_notify:
+                await self._send_reply(message, RATE_LIMIT_REPLY)
+            return
         reply, placeholder = await self._answer(message, text, key, where)
         await self._deliver_reply(message, reply or EMPTY_REPLY, placeholder)
 
@@ -426,6 +444,7 @@ class DiscordAssistClient(discord.Client):
                 discord_user_id=message.author.id,
                 conversation_key=key,
                 where=where,
+                rate_checked=True,
             )
         )
         placeholder: discord.Message | None = None

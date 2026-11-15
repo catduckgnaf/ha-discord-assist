@@ -8,10 +8,12 @@ import custom_components.discord_assist.bot as bot_module
 from custom_components.discord_assist.bot import (
     ERROR_REPLY,
     PLACEHOLDER_REPLY,
+    RATE_LIMIT_REPLY,
     TIMEOUT_REPLY,
     DiscordAssistClient,
 )
 from custom_components.discord_assist.const import DEFAULT_PLACEHOLDER_DELAY
+from custom_components.discord_assist.conversation_cache import RateLimitDecision
 from custom_components.discord_assist.conversation_router import AgentTimeout
 from custom_components.discord_assist.text_utils import chunk_message
 from tests.fake_discord import (
@@ -184,6 +186,46 @@ async def test_on_message_replies_on_timeout(monkeypatch):
     msg = _message("<@999> hi", mentions=[FakeUser(id=999)])
     await client.on_message(msg)
     assert _first_send(msg).content == TIMEOUT_REPLY
+
+
+async def test_on_message_slow_down_notice_once(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.check_rate_limit.return_value = RateLimitDecision(False, True)
+    router.process = AsyncMock(return_value="never")
+    client = _client(router, monkeypatch)
+    msg = _message("<@999> hi", mentions=[FakeUser(id=999)])
+    await client.on_message(msg)
+    router.process.assert_not_called()
+    assert _first_send(msg).content == RATE_LIMIT_REPLY
+    assert "Slow down" in RATE_LIMIT_REPLY
+    # Throttled before any typing indicator was shown.
+    assert msg.channel.typing_calls == 0
+
+
+async def test_on_message_rate_limited_silence_after_notice(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.check_rate_limit.return_value = RateLimitDecision(False, False)
+    router.process = AsyncMock(return_value="never")
+    client = _client(router, monkeypatch)
+    msg = _message("<@999> hi", mentions=[FakeUser(id=999)])
+    await client.on_message(msg)
+    router.process.assert_not_called()
+    assert msg.channel.send_calls == []
+    assert msg.channel.typing_calls == 0
+
+
+async def test_on_message_allowed_skips_second_rate_check(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.check_rate_limit.return_value = RateLimitDecision(True, False)
+    router.process = AsyncMock(return_value="ok")
+    client = _client(router, monkeypatch)
+    msg = _message("<@999> hi", mentions=[FakeUser(id=999)])
+    await client.on_message(msg)
+    router.check_rate_limit.assert_called_once_with(7)
+    assert router.process.call_args.kwargs["rate_checked"] is True
 
 
 async def test_long_reply_only_first_piece_is_a_reply(monkeypatch):

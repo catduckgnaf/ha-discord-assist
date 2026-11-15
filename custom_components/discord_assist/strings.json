@@ -22,6 +22,8 @@
           "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
           "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
           "agent_timeout": "Give up on the agent after this many seconds",
+          "rate_limit_per_minute": "Max requests per Discord user per minute (0 = no limit)",
+          "rate_limit_burst": "Requests a Discord user may send in a burst before the limit applies",
           "placeholder_delay": "Show a working placeholder after this many seconds"
         }
       },
@@ -83,6 +85,8 @@
           "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
           "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
           "agent_timeout": "Give up on the agent after this many seconds",
+          "rate_limit_per_minute": "Max requests per Discord user per minute (0 = no limit)",
+          "rate_limit_burst": "Requests a Discord user may send in a burst before the limit applies",
           "placeholder_delay": "Show a working placeholder after this many seconds"
         }
       },
