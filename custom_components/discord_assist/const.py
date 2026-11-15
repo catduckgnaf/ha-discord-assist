@@ -25,6 +25,8 @@ CONF_PREFER_LOCAL = "prefer_local"
 CONF_AGENT_TIMEOUT = "agent_timeout"
 CONF_PLACEHOLDER_DELAY = "placeholder_delay"
 CONF_ROOM_MAP = "room_map"
+CONF_AGENT_MAP_USER = "agent_map_user"
+CONF_AGENT_MAP_CHANNEL = "agent_map_channel"
 CONF_RATE_LIMIT_PER_MINUTE = "rate_limit_per_minute"
 CONF_RATE_LIMIT_BURST = "rate_limit_burst"
 

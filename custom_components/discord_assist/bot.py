@@ -27,7 +27,6 @@ from .conversation_router import (
     ConversationRouter,
     MessageContext,
     RateLimited,
-    make_conversation_key,
 )
 from .recent_errors import RecentErrors
 from .text_utils import chunk_message, strip_self_mention
@@ -398,8 +397,8 @@ class DiscordAssistClient(discord.Client):
             await self._edit_interaction_reply(interaction, UNAUTHORIZED_REPLY)
             return
 
-        key = make_conversation_key(
-            is_dm=is_dm, channel_id=channel_id, author_id=user.id
+        key = self.router.conversation_key(
+            is_dm=is_dm, channel_id=channel_id, author_id=user.id, parent_id=parent_id
         )
         where = MessageContext(
             display_name=getattr(user, "display_name", None),
@@ -470,8 +469,13 @@ class DiscordAssistClient(discord.Client):
         if not text:
             return
 
-        key = make_conversation_key(
-            is_dm=is_dm, channel_id=message.channel.id, author_id=message.author.id
+        # The key carries the resolved agent: a conversation_id belongs to
+        # the agent that created it, so a different agent must not reuse it.
+        key = self.router.conversation_key(
+            is_dm=is_dm,
+            channel_id=message.channel.id,
+            author_id=message.author.id,
+            parent_id=parent_id,
         )
         where = MessageContext(
             display_name=getattr(message.author, "display_name", None),
