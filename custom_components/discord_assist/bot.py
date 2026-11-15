@@ -8,6 +8,13 @@ import discord
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
+from .buttons import (
+    ActionButtonDispatcher,
+    ButtonRecordStore,
+    ButtonSpec,
+    async_send_action_message,
+    parse_custom_id,
+)
 from .conversation_router import (
     AgentTimeout,
     ConversationRouter,
@@ -27,7 +34,14 @@ class DiscordAssistClient(discord.Client):
     """Listens for messages and routes them to the HA conversation agent."""
 
     def __init__(
-        self, hass: HomeAssistant, router: ConversationRouter, status_signal: str
+        self,
+        hass: HomeAssistant,
+        router: ConversationRouter,
+        status_signal: str,
+        *,
+        config_entry_id: str = "",
+        button_store: ButtonRecordStore | None = None,
+        action_dispatcher: ActionButtonDispatcher | None = None,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -40,6 +54,18 @@ class DiscordAssistClient(discord.Client):
         self.router = router
         self.connected = False
         self._status_signal = status_signal
+        self.button_store = button_store
+        if action_dispatcher is not None:
+            self.action_dispatcher: ActionButtonDispatcher | None = action_dispatcher
+        elif button_store is not None:
+            self.action_dispatcher = ActionButtonDispatcher(
+                hass,
+                button_store,
+                config_entry_id=config_entry_id,
+                ha_user_for=router.ha_user_for,
+            )
+        else:
+            self.action_dispatcher = None
 
     def _set_connected(self, connected: bool) -> None:
         if connected != self.connected:
@@ -96,6 +122,38 @@ class DiscordAssistClient(discord.Client):
         except Exception:  # noqa: BLE001 - never let the gateway die
             _LOGGER.exception("Conversation processing failed")
         await self._send_reply(message, reply or EMPTY_REPLY)
+
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """Dispatch actionable button presses (``da:act:<record_id>``).
+
+        Anything without our prefix belongs to another feature or bot and
+        is ignored. Presses fire ``discord_assist_action`` events via the
+        dispatcher; see buttons.ActionButtonDispatcher for who may press.
+        """
+        if self.action_dispatcher is None:
+            return
+        data = interaction.data if isinstance(interaction.data, dict) else {}
+        if parse_custom_id(data.get("custom_id")) is None:
+            return
+        await self.action_dispatcher.async_handle_interaction(interaction)
+
+    async def async_send_action_message(
+        self,
+        channel,
+        content: str,
+        buttons: list[ButtonSpec] | None = None,
+    ):
+        """Post a message with actionable buttons to a channel object.
+
+        Minimal internal send path for #24. The ``send_message`` service
+        (#23) resolves the target to a channel and calls this helper (or
+        ``buttons.async_send_action_message`` with the entry's store).
+        """
+        if self.button_store is None:
+            raise RuntimeError("This client has no button store configured")
+        return await async_send_action_message(
+            self.button_store, channel, content, buttons
+        )
 
     async def _send_reply(self, message: discord.Message, reply: str) -> None:
         """First piece replies to the message (no ping); the rest follow it.

@@ -15,6 +15,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import issue_registry as ir
 
 from .bot import DiscordAssistClient
+from .buttons import ButtonRecordStore
 from .const import (
     CONF_TOKEN,
     DOMAIN,
@@ -37,6 +38,10 @@ class RuntimeData:
 
     client: DiscordAssistClient
     router: ConversationRouter
+    # Persistent actionable-button records (#24). The send_message service
+    # (#23) posts buttons through the client's async_send_action_message,
+    # which records into this store.
+    button_store: ButtonRecordStore | None = None
 
 
 type DiscordConfigEntry = ConfigEntry[RuntimeData]
@@ -70,7 +75,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
     _set_issue(hass, entry, ISSUE_NO_AUTHORIZED_USERS, not router.has_authorized_users)
     _set_issue(hass, entry, ISSUE_MESSAGE_CONTENT_INTENT, False)
 
-    client = DiscordAssistClient(hass, router, signal_connection(entry.entry_id))
+    button_store = ButtonRecordStore(hass, entry.entry_id)
+    client = DiscordAssistClient(
+        hass,
+        router,
+        signal_connection(entry.entry_id),
+        config_entry_id=entry.entry_id,
+        button_store=button_store,
+    )
     # Log in over REST first so a dead network or bad token surfaces here,
     # where Home Assistant retries with backoff or starts reauth.
     try:
@@ -82,7 +94,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         await client.close()
         raise ConfigEntryNotReady(f"Could not reach Discord: {err}") from err
 
-    entry.runtime_data = RuntimeData(client=client, router=router)
+    entry.runtime_data = RuntimeData(
+        client=client, router=router, button_store=button_store
+    )
 
     async def _run() -> None:
         try:

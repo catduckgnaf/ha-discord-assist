@@ -24,6 +24,7 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 - Fails closed: Discord users it cannot run as a Home Assistant user are ignored
 - Replies can never ping `@everyone`, roles, or users
 - Retries setup when Discord is unreachable and reloads if the gateway dies
+- Actionable notification buttons that fire a `discord_assist_action` event when pressed
 - `Discord gateway` connectivity sensor for alerting
 - Repair issues for "nobody is authorized" and a missing Message Content intent
 - One-click import from the Discord Conversation integration it was forked from
@@ -114,6 +115,28 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for what is planned to make this easier.
 ## Room channels
 
 A voice satellite knows which room it is in; a Discord channel does not, unless you tell it. In options, choose **Treat a channel as a room**, pick the channel, and pick any device in that room's area. Messages in that channel and its threads are sent with that device, so the built-in agent and LLM agents using Home Assistant's Assist API treat the device's area as the default room. With speaker context on, the room name is also in the prompt for agents that read it.
+
+## Actionable notifications
+
+Buttons on outbound messages can fire a `discord_assist_action` event when pressed, like the mobile app's actionable notifications. For example, a doorbell automation can post a snapshot with "Unlock front door" and "Ignore" buttons; pressing one fires:
+
+```yaml
+event_type: discord_assist_action
+event_data:
+  action: unlock_front_door   # the id the automation gave the button
+  message_id: 1234567890
+  channel_id: 111222333
+  discord_user_id: 444555666
+  discord_user_name: Andrew
+  ha_user_id: <mapped Home Assistant user id, or null>
+  config_entry_id: <the Discord Assist entry>
+```
+
+The event is fired with the presser's Home Assistant user as its context, so automations can check who pressed. Buttons are single-use by default: a second press fires nothing. A button record can instead be multi-use, and can name the Discord users allowed to press it. Pressers with no Home Assistant mapping are refused by default and fire no event, unless the button record names them explicitly. Button records are stored persistently, so buttons posted before a restart still work after it. The logbook shows presses as "Andrew pressed Unlock front door".
+
+> **Warning:** the automation does the action, so Home Assistant permissions apply to the automation, not the presser. An "Unlock front door" button is exactly as safe as the automation's own conditions. Check the presser's `ha_user_id` in a condition when it matters, and do not treat a button press by itself as approval for a sensitive action.
+
+Buttons are posted through the `discord_assist.send_message` action (tracked separately); the integration's internal send helper records each button and posts it with a `da:act:<record_id>` custom id that the bot's interaction dispatcher routes to this event.
 
 ## User mapping
 

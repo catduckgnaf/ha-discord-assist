@@ -40,6 +40,13 @@ RECONNECT_DELAY = 60
 ISSUE_NO_AUTHORIZED_USERS = "no_authorized_users"
 ISSUE_MESSAGE_CONTENT_INTENT = "message_content_intent"
 
+# Event fired when an actionable notification button is pressed (#24).
+EVENT_ACTION = "discord_assist_action"
+
+# custom_id prefix for actionable buttons: da:act:<record_id> (#24, on the
+# da:<action>:<record_id> shape proposed for the button dispatcher in #13).
+ACTION_CUSTOM_ID_PREFIX = "da:act:"
+
 
 def signal_connection(entry_id: str) -> str:
     """Dispatcher signal fired when the gateway connection state changes."""
