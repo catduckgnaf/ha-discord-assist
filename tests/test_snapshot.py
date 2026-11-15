@@ -74,6 +74,9 @@ def _fake_hass(states, user):
         ("turn off the lights", None),
         ("show me the driveway", None),
         ("please snapshot the driveway", None),
+        ("snapshot: porch", "porch"),
+        ("snapshots of the backup failed", None),
+        ("Snapshotting HA now", None),
     ],
 )
 def test_parse_snapshot_command(text, expected):
@@ -167,6 +170,22 @@ async def test_snapshot_by_entity_id_and_ambiguous_name():
     assert "More than one camera" in ambiguous.text
 
 
+async def test_exact_only_skips_fuzzy_camera_matches():
+    """'show me the front door status' must not grab the Front Door camera."""
+    hass = _fake_hass([_state("camera.front_door", "Front Door")], _user())
+    router = _router(hass)
+    with (
+        patch(_SHOULD_EXPOSE, return_value=True),
+        patch(_GET_IMAGE, new=AsyncMock()) as get_image,
+    ):
+        fuzzy = await router.process_snapshot(
+            query="front door status", discord_user_id=7, exact_only=True
+        )
+    assert fuzzy.matched is False
+    assert fuzzy.image_content is None
+    get_image.assert_not_called()
+
+
 async def test_large_snapshot_is_downscaled_by_width():
     hass = _fake_hass([_state()], _user())
     router = _router(hass)
@@ -255,7 +274,9 @@ def _message(content, *, channel_id=111):
 def _client(router, monkeypatch):
     with patch("discord.Client.__init__", return_value=None):
         client = DiscordAssistClient(
-            hass=object(), router=router, status_signal="test_signal"
+            hass=SimpleNamespace(bus=SimpleNamespace(async_fire=MagicMock())),
+            router=router,
+            status_signal="test_signal",
         )
     monkeypatch.setattr(
         type(client), "user", property(lambda self: SimpleNamespace(id=999))
@@ -279,7 +300,7 @@ async def test_bot_snapshot_command_attaches_fetched_file(monkeypatch):
     msg = _message("snapshot driveway")
     await client.on_message(msg)
     router.process_snapshot.assert_awaited_once_with(
-        query="driveway", discord_user_id=7
+        query="driveway", discord_user_id=7, exact_only=False
     )
     router.process.assert_not_called()
     msg.channel.send.assert_awaited_once()
@@ -295,8 +316,9 @@ async def test_bot_show_me_attaches_fetched_file(monkeypatch):
     client = _client(router, monkeypatch)
     msg = _message("show me the driveway")
     await client.on_message(msg)
+    # "show me" only takes over on an exact camera name.
     router.process_snapshot.assert_awaited_once_with(
-        query="driveway", discord_user_id=7
+        query="driveway", discord_user_id=7, exact_only=True
     )
     router.process.assert_not_called()
     assert msg.channel.send.await_args.kwargs["file"].fp.getvalue() == JPEG

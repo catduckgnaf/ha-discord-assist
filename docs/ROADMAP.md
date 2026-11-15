@@ -53,8 +53,11 @@ Grouped by theme. Effort: S (hours), M (a day or two), L (a week).
    (`conversation.home_assistant`) first and only fall back to the LLM when no
    intent matches. "Turn off all the lights" becomes instant, free, and
    deterministic. Mirrors Print Handy's deterministic-first routing.
-4. **Longer memory (S).** Raise the idle reset default and add a per-channel
-   override. Add a `reset` command (and slash command) to start fresh.
+4. **Longer memory (S).** Done in part, with a limit: see the decision below.
+   The `reset` text command and a per-channel idle override shipped; the idle
+   default was not raised, because Home Assistant core expires chat sessions
+   after 5 idle minutes (below). The `/reset` slash command is part of the
+   slash commands work (#19).
 5. **Standing preferences (M).** "Remember: all the lights means all lights."
    Store per-user notes in the integration's store and inject them via
    `extra_system_prompt`. Editable in options and via a `/remember` command.
@@ -65,6 +68,33 @@ Grouped by theme. Effort: S (hours), M (a day or two), L (a week).
    family channel gets the LLM.
 8. **Reply as a reply (S).** Use `message.reply()` with
    `fail_if_not_exists=False` so answers thread visually.
+
+### Decision: longer memory means preferences, not transcripts (#15)
+
+Home Assistant core expires a chat session after 5 idle minutes
+(`CONVERSATION_TIMEOUT` in `helpers/chat_session.py`), and the chat log is
+deleted with the session. For every agent built on `ChatLog` (all core LLM
+agents, and Extended OpenAI Conversation), the history is therefore gone
+after 5 idle minutes no matter what conversation id Discord Assist caches.
+Raising Discord Assist's idle default above 5 minutes does nothing for those
+agents, so the default stays at 15 minutes and the limit is stated plainly in
+the README instead.
+
+Decision: Discord Assist will **not** keep its own transcript and re-supply
+it to the agent (for example via `extra_system_prompt`). Re-supplying would
+duplicate history the agent already manages, spend tokens on every turn, and
+risk stale or conflicting context. Longer memory instead comes from standing
+preferences (suggestion 5, #16): short, deliberate facts the user asked to
+keep, injected on every turn.
+
+What the idle settings do control is when Discord Assist drops the cached
+conversation id: the global idle minutes, plus a per-channel override in
+options for channels that should reset sooner or later. That matters for
+agents that keep their own history keyed by conversation id, and for keeping
+busy channels from resuming stale threads. Sending a message that is exactly
+`reset` (any case) drops the cached id for that channel or DM on demand and
+replies "Started a fresh conversation."; the `/reset` slash command is
+tracked with the slash commands work (#19).
 
 ### Discord features
 
@@ -222,6 +252,37 @@ Assistant's Device control API as the speaker's own user. Design, transport
 choice (in-process ha-mcp LLM API or MCP client to the app) and open questions
 are in issue #40.
 
+### Decision: conversation keying in shared channels (2026-11-15)
+
+Conversations in a channel are keyed per channel by default
+(`channel:<id>`), so everyone talking in a channel shares one agent history,
+the same way everyone in a room shares a voice satellite's conversation.
+Direct messages are always keyed per user (`dm:<id>`). Profiles do not
+restrict this by default.
+
+The exposure is stated plainly: in the default channel scope, anything one
+speaker tells the agent is part of the shared history that other channel
+members can continue, so a guest in the family channel can ask "what did
+Andrew just ask you?" and the agent can answer from the earlier turns.
+Discord already shows the channel's messages and the bot's replies to every
+member; what is additionally shared is what lives only in the agent history,
+such as tool results and system prompt content (speaker context, standing
+preferences). The exposure is bounded: this integration's conversation cache
+expires after the configured idle minutes, and Home Assistant core chat
+sessions expire after 5 idle minutes.
+
+For channels where that is not acceptable, the `conversation_scope` option
+can be set to `user`: channel keys become `channel:<id>:user:<id>`, so each
+person gets their own history in the channel. The cost is the shared-room
+feel: "turn it off again" no longer works across people, because a follow-up
+only sees the speaker's own turns. Per-profile keys were considered and not
+chosen: a profile is an access rule, not a social grouping, and per-user
+keys already cover the isolation need.
+
+Switching the scope does not migrate existing conversations. The keys
+simply change, so conversations started under the old scope stop being
+continued and idle-expire on their own.
+
 ### Open questions
 
 - ~~Which agent should Luna run behind?~~ Decided: the bundled agent above (#36, #40).
@@ -229,8 +290,9 @@ are in issue #40.
   Assistant LLM APIs; Extended OpenAI Conversation does not.
 - Discord roles need the Server Members intent to read member roles reliably.
   It is a privileged intent; acceptable for a private server.
-- Should profiles also restrict which conversation history a user can see in
-  shared channels?
+- ~~Should profiles also restrict which conversation history a user can see
+  in shared channels?~~ Decided: shared per channel by default, with a
+  per-user scope option (see the decision above).
 
 ## 0.3.1 (built)
 

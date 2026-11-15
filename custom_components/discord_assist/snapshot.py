@@ -29,7 +29,9 @@ SNAPSHOT_FILENAME = "snapshot.jpg"
 LARGE_IMAGE_BYTES = 8 * 1024 * 1024
 DOWNSCALE_WIDTH = 1280
 
-_SNAPSHOT_RE = re.compile(r"^snapshot\s*:?\s*(.*)$", re.IGNORECASE | re.DOTALL)
+# "snapshot", "snapshot: x" or "snapshot x"; never "snapshots ..." or
+# "snapshotting ...", which are ordinary messages for the agent.
+_SNAPSHOT_RE = re.compile(r"^snapshot(?:\s*:\s*|\s+|$)(.*)$", re.IGNORECASE | re.DOTALL)
 _SHOW_ME_RE = re.compile(
     r"^show\s+me\s+(?:the\s+|a\s+|an\s+)?(.*)$", re.IGNORECASE | re.DOTALL
 )
@@ -132,7 +134,9 @@ class _Resolution:
     matched: bool
 
 
-def _resolve(hass: HomeAssistant, user, query: str) -> _Resolution:
+def _resolve(
+    hass: HomeAssistant, user, query: str, *, exact_only: bool = False
+) -> _Resolution:
     cameras = _allowed_cameras(hass, user)
     normalized = _normalize(query)
     if not normalized:
@@ -142,11 +146,18 @@ def _resolve(hass: HomeAssistant, user, query: str) -> _Resolution:
         if query.strip().lower() == state.entity_id:
             return _Resolution(state, None, True)
     exact = [s for s in cameras if normalized in _aliases(s)]
-    matches = exact or [
-        s
-        for s in cameras
-        if any(normalized in alias or alias in normalized for alias in _aliases(s))
-    ]
+    # Fuzzy matching is only for the explicit snapshot command; "show me"
+    # must name a camera exactly, or "show me the front door status" would
+    # be taken away from the agent.
+    matches = exact or (
+        []
+        if exact_only
+        else [
+            s
+            for s in cameras
+            if any(normalized in alias or alias in normalized for alias in _aliases(s))
+        ]
+    )
     if len(matches) == 1:
         return _Resolution(matches[0], None, True)
     if len(matches) > 1:
@@ -196,9 +207,11 @@ async def _fetch_image(
     )
 
 
-async def fetch_snapshot(hass: HomeAssistant, user, query: str) -> SnapshotResult:
+async def fetch_snapshot(
+    hass: HomeAssistant, user, query: str, *, exact_only: bool = False
+) -> SnapshotResult:
     """Resolve, authorize, and fetch one snapshot. Never raises for refusals."""
-    resolution = _resolve(hass, user, query)
+    resolution = _resolve(hass, user, query, exact_only=exact_only)
     if resolution.state is None:
         return SnapshotResult(
             text=resolution.refusal or "Which camera?", matched=resolution.matched
