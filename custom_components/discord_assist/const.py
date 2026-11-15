@@ -73,6 +73,9 @@ ISSUE_NO_AUTHORIZED_USERS = "no_authorized_users"
 ISSUE_MESSAGE_CONTENT_INTENT = "message_content_intent"
 ISSUE_DUPLICATE_TOKEN = "duplicate_token"
 
+# Event fired when an actionable notification button is pressed (#24).
+EVENT_ACTION = "discord_assist_action"
+
 
 def signal_connection(entry_id: str) -> str:
     """Dispatcher signal fired when the gateway connection state changes."""

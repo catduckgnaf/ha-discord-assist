@@ -345,6 +345,16 @@ class DiscordAssistClient(discord.Client):
             translation_placeholders={"entry_title": self._entry_title or ""},
         )
 
+    async def async_send_action_message(
+        self, channel: Any, content: str, buttons: Any = (), **send_kwargs: Any
+    ) -> list[Any]:
+        """Post a message with actionable buttons (see actions.py)."""
+        from .actions import async_send_action_message
+
+        return await async_send_action_message(
+            self, channel, content, buttons, **send_kwargs
+        )
+
     def register_button_handler(self, action: str, handler: ButtonHandler) -> None:
         """Register the coroutine run when a button with ``action`` is pressed."""
         self._button_handlers[action] = handler

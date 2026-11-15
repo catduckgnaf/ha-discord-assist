@@ -17,6 +17,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.device_registry import DeviceEntryType
 
+from .actions import ACTION, make_action_handler
 from .bot import DiscordAssistClient
 from .buttons import ButtonStore
 from .const import (
@@ -140,6 +141,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         ),
         recent_errors=recent_errors,
         entry_title=entry.title,
+    )
+    client.register_button_handler(
+        ACTION, make_action_handler(hass, client, entry.entry_id)
     )
     # Log in over REST first so a dead network or bad token surfaces here,
     # where Home Assistant retries with backoff or starts reauth.
