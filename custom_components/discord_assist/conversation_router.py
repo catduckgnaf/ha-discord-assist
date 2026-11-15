@@ -25,6 +25,7 @@ from .const import (
     CONF_ALLOWLIST,
     CONF_CHANNEL_IDLE_MINUTES,
     CONF_CHANNELS,
+    CONF_CLARIFY_BUTTONS_HEURISTIC,
     CONF_CONVERSATION_SCOPE,
     CONF_EVENT_EXCLUDE_TEXT,
     CONF_FALLBACK_USER,
@@ -42,6 +43,7 @@ from .const import (
     CONVERSATION_SCOPE_USER,
     CONVERSATION_SCOPES,
     DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_CLARIFY_BUTTONS_HEURISTIC,
     DEFAULT_CONVERSATION_SCOPE,
     DEFAULT_EVENT_EXCLUDE_TEXT,
     DEFAULT_IDLE_MINUTES,
@@ -204,6 +206,21 @@ def _speech(result: ConversationResult) -> str:
     return (speech.get("plain") or {}).get("speech") or ""
 
 
+@dataclass(frozen=True)
+class DetailedReply:
+    """A reply plus the conversation signal ``process()`` drops."""
+
+    speech: str
+    continue_conversation: bool = False
+
+
+def _details(result: ConversationResult) -> DetailedReply:
+    return DetailedReply(
+        speech=_speech(result),
+        continue_conversation=bool(getattr(result, "continue_conversation", False)),
+    )
+
+
 def _local_needs_fallback(result: ConversationResult) -> bool:
     response = result.response
     return (
@@ -238,6 +255,7 @@ class ConversationRouter:
     rate_limit_burst: int = DEFAULT_RATE_LIMIT_BURST
     rate_limiter: RateLimiter | None = None
     turns: TurnLocks = field(default_factory=TurnLocks)
+    clarify_buttons_heuristic: bool = DEFAULT_CLARIFY_BUTTONS_HEURISTIC
     # The integration's own per-entry device. Channels that are not mapped
     # to a room pass this device so Assist timer intents work there (it has
     # the registered timer handler); room-mapped channels keep their room
@@ -390,6 +408,25 @@ class ConversationRouter:
         where: MessageContext | None = None,
         rate_checked: bool = False,
     ) -> str:
+        """Run one authorized turn and return only its speech."""
+        detailed = await self.process_detailed(
+            text=text,
+            discord_user_id=discord_user_id,
+            conversation_key=conversation_key,
+            where=where,
+            rate_checked=rate_checked,
+        )
+        return detailed.speech
+
+    async def process_detailed(
+        self,
+        *,
+        text: str,
+        discord_user_id: int,
+        conversation_key: str,
+        where: MessageContext | None = None,
+        rate_checked: bool = False,
+    ) -> DetailedReply:
         """Run one authorized turn through the conversation agent.
 
         ``rate_checked`` is True when the caller already consumed this
@@ -469,7 +506,7 @@ class ConversationRouter:
         agent_id: str | None,
         *,
         discord_user_id: int | None = None,
-    ) -> str:
+    ) -> DetailedReply:
         # Prefer-local applies on top of the resolved agent: the local agent
         # is tried first unless the resolved agent already is the local one.
         if self.prefer_local and agent_id != LOCAL_AGENT_ID:
@@ -485,7 +522,7 @@ class ConversationRouter:
                 device_id=device_id,
             )
             if not _local_needs_fallback(local):
-                return _speech(local)
+                return _details(local)
 
         # Standing preferences are deliberately NOT coupled to the
         # speaker_context switch: that switch controls the speaker/channel/
@@ -512,7 +549,7 @@ class ConversationRouter:
             extra_system_prompt=extra,
         )
         self.cache.set(conversation_key, result.conversation_id)
-        return _speech(result)
+        return _details(result)
 
     async def _speaker_prompt(
         self, ha_user_id: str | None, device_id: str | None, where: MessageContext
@@ -623,4 +660,9 @@ class ConversationRouter:
                 opts, CONF_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_BURST
             ),
             notes_store=notes_store,
+            clarify_buttons_heuristic=bool(
+                opts.get(
+                    CONF_CLARIFY_BUTTONS_HEURISTIC, DEFAULT_CLARIFY_BUTTONS_HEURISTIC
+                )
+            ),
         )

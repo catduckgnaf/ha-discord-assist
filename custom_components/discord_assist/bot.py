@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import io
 import logging
 import secrets
@@ -19,10 +20,12 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from .buttons import (
     ButtonHandler,
     ButtonOutcome,
+    ButtonRecord,
     ButtonStore,
     parse_custom_id,
     retired_content,
 )
+from .clarify import ANSWER_ACTION, CLARIFY_ANSWERS, needs_clarify_buttons
 from .const import (
     DEFAULT_PLACEHOLDER_DELAY,
     DOMAIN,
@@ -33,6 +36,7 @@ from .const import (
 from .conversation_router import (
     AgentTimeout,
     ConversationRouter,
+    DetailedReply,
     MessageContext,
     RateLimited,
     is_reset_command,
@@ -215,6 +219,7 @@ class DiscordAssistClient(discord.Client):
         self._commands_synced = False
         self.button_store = button_store
         self._button_handlers: dict[str, ButtonHandler] = dict(button_handlers or {})
+        self._button_handlers.setdefault(ANSWER_ACTION, self._answer_pressed)
         # The client owns its slash-command tree. Building it needs a fully
         # initialized discord.Client (http session and connection state), so
         # a failure here (for example a test double) leaves _tree unset and
@@ -844,8 +849,18 @@ class DiscordAssistClient(discord.Client):
                 await self._send_snapshot_reply(message, result)
                 return
         self._fire_message_event(message, text=text, is_dm=is_dm)
-        reply, placeholder = await self._answer(message, text, key, where)
-        await self._deliver_reply(message, reply or EMPTY_REPLY, placeholder)
+        # A newer turn retires clarify buttons still pending for this
+        # conversation, so an old question cannot be answered out of order.
+        await self._retire_clarify(key)
+        reply, placeholder, follow_up = await self._answer(message, text, key, where)
+        last = await self._deliver_reply(message, reply or EMPTY_REPLY, placeholder)
+        if follow_up:
+            await self._attach_clarify(
+                last,
+                conversation_key=key,
+                speaker_id=message.author.id,
+                parent_id=parent_id,
+            )
 
     def _fire_message_event(
         self, message: discord.Message, *, text: str, is_dm: bool
@@ -955,17 +970,19 @@ class DiscordAssistClient(discord.Client):
             allowed_mentions = discord.AllowedMentions.none()
         await self.send_to_channel(channel, text, allowed_mentions=allowed_mentions)
 
-    async def _send_reply(self, message: discord.Message, reply: str) -> None:
+    async def _send_reply(self, message: discord.Message, reply: str) -> Any:
         """First piece replies to the message (no ping); the rest follow it.
 
         If the original message was deleted meanwhile, Discord posts the
-        reply as a plain message instead of failing.
+        reply as a plain message instead of failing. Returns the last
+        message sent, or None.
         """
         reference = message.to_reference(fail_if_not_exists=False)
+        last = None
         for part in chunk_message(reply):
             try:
                 if reference is not None:
-                    await self.send_to_channel(
+                    last = await self.send_to_channel(
                         message.channel,
                         part,
                         reference=reference,
@@ -973,13 +990,14 @@ class DiscordAssistClient(discord.Client):
                     )
                     reference = None
                 else:
-                    await self.send_to_channel(message.channel, part)
+                    last = await self.send_to_channel(message.channel, part)
             except discord.HTTPException as err:
                 self.recent_errors.record(err, source="send_reply")
                 _LOGGER.warning(
                     "Failed to send reply to channel %s", message.channel.id
                 )
                 break
+        return last
 
     async def _post_placeholder(
         self, message: discord.Message
@@ -1007,17 +1025,18 @@ class DiscordAssistClient(discord.Client):
         message: discord.Message,
         reply: str,
         placeholder: discord.Message | None,
-    ) -> None:
+    ) -> Any:
         """Deliver a reply, editing the placeholder in place when one exists.
 
         The first chunk replaces the placeholder text; any remaining chunks
         are sent as follow-up messages. If the edit fails, fall back to
-        sending the whole reply as new messages.
+        sending the whole reply as new messages. Returns the last message
+        of the reply, or None.
         """
         if placeholder is None:
-            await self._send_reply(message, reply)
-            return
+            return await self._send_reply(message, reply)
         chunks = chunk_message(reply)
+        last = placeholder
         try:
             await placeholder.edit(
                 content=chunks[0],
@@ -1028,17 +1047,174 @@ class DiscordAssistClient(discord.Client):
             _LOGGER.warning(
                 "Failed to edit placeholder in channel %s", message.channel.id
             )
-            await self._send_reply(message, reply)
-            return
+            return await self._send_reply(message, reply)
         for part in chunks[1:]:
             try:
-                await self.send_to_channel(message.channel, part)
+                last = await self.send_to_channel(message.channel, part)
             except discord.HTTPException as err:
                 self.recent_errors.record(err, source="send_reply")
                 _LOGGER.warning(
                     "Failed to send reply to channel %s", message.channel.id
                 )
                 break
+        return last
+
+    async def _process_detailed(self, **kwargs: Any) -> DetailedReply:
+        """Run a turn keeping continue_conversation, via the router if it can.
+
+        Router doubles that only expose ``process()`` fall back to
+        speech-only with no follow-up signal.
+        """
+        detailed = getattr(self.router, "process_detailed", None)
+        if detailed is not None and inspect.iscoroutinefunction(detailed):
+            return await detailed(**kwargs)
+        return DetailedReply(speech=await self.router.process(**kwargs))
+
+    async def _attach_clarify(
+        self,
+        message: Any,
+        *,
+        conversation_key: str,
+        speaker_id: int,
+        parent_id: int | None,
+    ) -> None:
+        """Put Yes / No buttons on a reply that asks the speaker something."""
+        store = self.button_store
+        channel_id = getattr(getattr(message, "channel", None), "id", None)
+        if store is None or message is None or not hasattr(message, "edit"):
+            return
+        group_id = secrets.token_urlsafe(6)
+        records = [
+            await store.record(
+                ANSWER_ACTION,
+                payload={
+                    "conversation_key": conversation_key,
+                    "answer": answer,
+                    "channel_id": channel_id,
+                    "parent_id": parent_id,
+                },
+                # Only the person who was asked can answer.
+                allowed_user_ids=(speaker_id,),
+                group_id=group_id,
+            )
+            for answer in CLARIFY_ANSWERS
+        ]
+        view = discord.ui.View(timeout=None)
+        for record in records:
+            view.add_item(
+                discord.ui.Button(
+                    label=record.payload["answer"],
+                    style=(
+                        discord.ButtonStyle.success
+                        if record.payload["answer"] == "Yes"
+                        else discord.ButtonStyle.secondary
+                    ),
+                    custom_id=record.custom_id,
+                )
+            )
+        # Dispatch goes through on_interaction; a live view would sit in
+        # discord.py's view store forever.
+        view.stop()
+        try:
+            await message.edit(view=view)
+        except discord.HTTPException:
+            _LOGGER.warning("Failed to add clarify buttons", exc_info=True)
+            await store.async_remove_where(lambda r: r.group_id == group_id)
+            return
+        message_id = getattr(message, "id", None)
+        if isinstance(message_id, int) and isinstance(channel_id, int):
+            await store.bind_message(
+                [r.record_id for r in records],
+                channel_id=channel_id,
+                message_id=message_id,
+            )
+
+    async def _retire_clarify(self, conversation_key: str) -> None:
+        """Drop pending clarify buttons of a conversation, stripping them."""
+        if self.button_store is None:
+            return
+        removed = await self.button_store.async_remove_where(
+            lambda r: (
+                r.action == ANSWER_ACTION
+                and r.payload.get("conversation_key") == conversation_key
+            )
+        )
+        seen: set[tuple[int, int]] = set()
+        for record in removed:
+            if record.channel_id is None or record.message_id is None:
+                continue
+            target = (record.channel_id, record.message_id)
+            if target in seen:
+                continue
+            seen.add(target)
+            try:
+                channel = self.get_channel(record.channel_id)
+                if channel is None:
+                    continue
+                old = await channel.fetch_message(record.message_id)
+                await old.edit(view=None)
+            except Exception:  # noqa: BLE001 - the records are already gone
+                _LOGGER.debug("Could not strip old clarify buttons", exc_info=True)
+
+    async def _answer_pressed(
+        self, record: ButtonRecord, interaction: Any
+    ) -> ButtonOutcome:
+        """A Yes / No press: the answer is the speaker's next turn."""
+        payload = record.payload
+        key = payload["conversation_key"]
+        channel = getattr(interaction, "channel", None)
+        channel_id = payload.get("channel_id") or getattr(
+            interaction, "channel_id", None
+        )
+        user = interaction.user
+        is_dm = isinstance(channel, discord.DMChannel)
+        where = MessageContext(
+            display_name=getattr(user, "display_name", None),
+            channel_name=None if is_dm else getattr(channel, "name", None),
+            channel_id=channel_id,
+            # Threads keep their parent's room and area context.
+            parent_id=payload.get("parent_id"),
+        )
+        follow_up = False
+        try:
+            detailed = await self._process_detailed(
+                text=payload["answer"],
+                discord_user_id=user.id,
+                conversation_key=key,
+                where=where,
+            )
+            reply = detailed.speech or EMPTY_REPLY
+            follow_up = needs_clarify_buttons(
+                detailed.speech,
+                detailed.continue_conversation,
+                heuristic=bool(
+                    getattr(self.router, "clarify_buttons_heuristic", False)
+                ),
+            )
+        except RateLimited:
+            reply = RATE_LIMIT_REPLY
+        except AgentTimeout:
+            reply = TIMEOUT_REPLY
+        except Exception:  # noqa: BLE001 - never let the gateway die
+            _LOGGER.exception("Clarify button processing failed")
+            reply = ERROR_REPLY
+        last = None
+        if channel is not None:
+            for part in chunk_message(f"{payload['answer']}: {reply}"):
+                try:
+                    last = await self.send_to_channel(channel, part)
+                except discord.HTTPException:
+                    _LOGGER.warning("Failed to send clarify reply")
+                    break
+        if follow_up:
+            await self._attach_clarify(
+                last,
+                conversation_key=key,
+                speaker_id=user.id,
+                parent_id=payload.get("parent_id"),
+            )
+        # Strip the old buttons but keep the question as it was.
+        return ButtonOutcome(retire=True)
 
     async def _fetch_snapshot_result(
         self, message: discord.Message, query: str, *, exact_only: bool = False
@@ -1087,7 +1263,7 @@ class DiscordAssistClient(discord.Client):
 
     async def _answer(
         self, message: discord.Message, text: str, key: str, where: MessageContext
-    ) -> tuple[str, discord.Message | None]:
+    ) -> tuple[str, discord.Message | None, bool]:
         """Process the message with a capped typing indicator and a placeholder.
 
         Typing runs in a background task bounded by TYPING_CAP_SECONDS and
@@ -1101,7 +1277,7 @@ class DiscordAssistClient(discord.Client):
         """
         typing_task = asyncio.create_task(_bounded_typing(message.channel))
         task = asyncio.create_task(
-            self.router.process(
+            self._process_detailed(
                 text=text,
                 discord_user_id=message.author.id,
                 conversation_key=key,
@@ -1114,18 +1290,23 @@ class DiscordAssistClient(discord.Client):
             done, _ = await asyncio.wait({task}, timeout=self.placeholder_delay)
             if not done:
                 placeholder = await self._post_placeholder(message)
-            reply = await task
+            detailed = await task
         except AgentTimeout as err:
             self.recent_errors.record(err, source="on_message")
-            return TIMEOUT_REPLY, placeholder
+            return TIMEOUT_REPLY, placeholder, False
         except asyncio.CancelledError:
             task.cancel()
             raise
         except Exception as err:  # noqa: BLE001 - never let the gateway die
             self.recent_errors.record(err, source="on_message")
             _LOGGER.exception("Conversation processing failed")
-            return ERROR_REPLY, placeholder
+            return ERROR_REPLY, placeholder, False
         finally:
             typing_task.cancel()
             await asyncio.gather(typing_task, return_exceptions=True)
-        return reply, placeholder
+        follow_up = needs_clarify_buttons(
+            detailed.speech,
+            detailed.continue_conversation,
+            heuristic=bool(getattr(self.router, "clarify_buttons_heuristic", False)),
+        )
+        return detailed.speech, placeholder, follow_up

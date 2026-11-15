@@ -44,6 +44,7 @@ from .const import (
     CONF_BOT_ID,
     CONF_CHANNEL_IDLE_MINUTES,
     CONF_CHANNELS,
+    CONF_CLARIFY_BUTTONS_HEURISTIC,
     CONF_CONVERSATION_SCOPE,
     CONF_EVENT_EXCLUDE_TEXT,
     CONF_FALLBACK_USER,
@@ -63,6 +64,7 @@ from .const import (
     CONVERSATION_SCOPE_CHANNEL,
     CONVERSATION_SCOPE_USER,
     DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_CLARIFY_BUTTONS_HEURISTIC,
     DEFAULT_CONVERSATION_SCOPE,
     DEFAULT_EVENT_EXCLUDE_TEXT,
     DEFAULT_IDLE_MINUTES,
@@ -132,6 +134,10 @@ def build_config_schema(channel_options: list[SelectOptionDict]) -> vol.Schema:
             ): BooleanSelector(),
             vol.Optional(
                 CONF_PREFER_LOCAL, default=DEFAULT_PREFER_LOCAL
+            ): BooleanSelector(),
+            vol.Optional(
+                CONF_CLARIFY_BUTTONS_HEURISTIC,
+                default=DEFAULT_CLARIFY_BUTTONS_HEURISTIC,
             ): BooleanSelector(),
             vol.Optional(
                 CONF_TIMER_MENTION, default=DEFAULT_TIMER_MENTION

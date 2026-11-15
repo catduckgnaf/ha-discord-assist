@@ -25,6 +25,7 @@ CONF_PREFER_LOCAL = "prefer_local"
 CONF_AGENT_TIMEOUT = "agent_timeout"
 CONF_PLACEHOLDER_DELAY = "placeholder_delay"
 CONF_ROOM_MAP = "room_map"
+CONF_CLARIFY_BUTTONS_HEURISTIC = "clarify_buttons_heuristic"
 # Per-HA-user tool scopes for the scoped LLM API (permissions phase B).
 # Shape: {ha_user_id: {"areas": [...], "domains": [...], "entities": [...],
 # "deny_entities": [...], "read_only": bool}} - see llm_api.resolve_scope.
@@ -47,6 +48,7 @@ CONF_AGENT_MAP_CHANNEL = "agent_map_channel"
 CONF_RATE_LIMIT_PER_MINUTE = "rate_limit_per_minute"
 CONF_RATE_LIMIT_BURST = "rate_limit_burst"
 
+DEFAULT_CLARIFY_BUTTONS_HEURISTIC = False
 DEFAULT_RESPOND_DMS = True
 DEFAULT_RESPOND_MENTIONS = True
 DEFAULT_IDLE_MINUTES = 15
