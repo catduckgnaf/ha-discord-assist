@@ -12,6 +12,7 @@ from custom_components.discord_assist.const import (
     CONF_AGENT_MAP_USER,
     CONF_BOT_ID,
     CONF_CHANNELS,
+    CONF_CONVERSATION_SCOPE,
     CONF_FALLBACK_USER,
     CONF_ROOM_MAP,
     CONF_TOKEN,
@@ -72,6 +73,24 @@ async def test_options_settings_updates(hass: HomeAssistant):
         )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_CHANNELS] == ["555"]
+
+
+async def test_options_settings_conversation_scope(hass: HomeAssistant):
+    entry = _entry(hass)
+    with patch(
+        "custom_components.discord_assist.config_flow.list_text_channels",
+        new=AsyncMock(return_value=[]),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "settings"}
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {CONF_AGENT_ID: "conversation.ollama", CONF_CONVERSATION_SCOPE: "user"},
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_CONVERSATION_SCOPE] == "user"
 
 
 async def test_add_user_mapping(hass: HomeAssistant):

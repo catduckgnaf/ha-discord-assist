@@ -23,6 +23,7 @@ from .const import (
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
     CONF_CHANNELS,
+    CONF_CONVERSATION_SCOPE,
     CONF_EVENT_EXCLUDE_TEXT,
     CONF_FALLBACK_USER,
     CONF_IDLE_MINUTES,
@@ -35,7 +36,10 @@ from .const import (
     CONF_ROOM_MAP,
     CONF_SPEAKER_CONTEXT,
     CONF_USER_MAP,
+    CONVERSATION_SCOPE_USER,
+    CONVERSATION_SCOPES,
     DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_CONVERSATION_SCOPE,
     DEFAULT_EVENT_EXCLUDE_TEXT,
     DEFAULT_IDLE_MINUTES,
     DEFAULT_PREFER_LOCAL,
@@ -134,14 +138,23 @@ def make_conversation_key(
     channel_id: int,
     author_id: int,
     agent_id: str | None = None,
+    scope: str = DEFAULT_CONVERSATION_SCOPE,
 ) -> str:
     """One conversation per DM (by user) or per channel, per agent.
 
-    The agent segment matters: a conversation_id belongs to the agent that
-    created it, so switching agents must never reuse another agent's id.
-    Without an agent segment the key falls back to the plain location key.
+    DMs are always per user. In a channel the scope decides: "channel"
+    (the default) shares one conversation per channel, "user" gives each
+    author their own conversation in the channel. The agent segment
+    matters too: a conversation_id belongs to the agent that created it,
+    so switching agents must never reuse another agent's id. Without an
+    agent the key is the plain location key.
     """
-    base = f"dm:{author_id}" if is_dm else f"channel:{channel_id}"
+    if is_dm:
+        base = f"dm:{author_id}"
+    elif scope == CONVERSATION_SCOPE_USER:
+        base = f"channel:{channel_id}:user:{author_id}"
+    else:
+        base = f"channel:{channel_id}"
     return f"{base}:agent:{agent_id}" if agent_id else base
 
 
@@ -185,6 +198,7 @@ class ConversationRouter:
     speaker_context: bool = DEFAULT_SPEAKER_CONTEXT
     prefer_local: bool = DEFAULT_PREFER_LOCAL
     agent_timeout: float = DEFAULT_AGENT_TIMEOUT
+    conversation_scope: str = DEFAULT_CONVERSATION_SCOPE
     rate_limit_per_minute: int = DEFAULT_RATE_LIMIT_PER_MINUTE
     rate_limit_burst: int = DEFAULT_RATE_LIMIT_BURST
     rate_limiter: RateLimiter | None = None
@@ -279,13 +293,15 @@ class ConversationRouter:
         """The conversation key for one request, carrying its resolved agent.
 
         Every entry point (messages, interactions) builds its key here, so
-        the key always names the agent ``process`` will actually use.
+        the key always names the agent ``process`` will actually use and
+        follows the configured conversation scope.
         """
         return make_conversation_key(
             is_dm=is_dm,
             channel_id=channel_id,
             author_id=author_id,
             agent_id=self.agent_for(author_id, channel_id, parent_id),
+            scope=self.conversation_scope,
         )
 
     def check_rate_limit(self, discord_user_id: int) -> RateLimitDecision:
@@ -415,6 +431,14 @@ class ConversationRouter:
     @classmethod
     def from_entry(cls, hass: HomeAssistant, entry: ConfigEntry) -> ConversationRouter:
         opts = entry.options
+        scope = opts.get(CONF_CONVERSATION_SCOPE, DEFAULT_CONVERSATION_SCOPE)
+        if scope not in CONVERSATION_SCOPES:
+            _LOGGER.warning(
+                "Ignoring unknown conversation scope %r; using %r",
+                scope,
+                DEFAULT_CONVERSATION_SCOPE,
+            )
+            scope = DEFAULT_CONVERSATION_SCOPE
         return cls(
             hass=hass,
             agent_id=opts.get(CONF_AGENT_ID),
@@ -438,6 +462,7 @@ class ConversationRouter:
             speaker_context=opts.get(CONF_SPEAKER_CONTEXT, DEFAULT_SPEAKER_CONTEXT),
             prefer_local=opts.get(CONF_PREFER_LOCAL, DEFAULT_PREFER_LOCAL),
             agent_timeout=float(opts.get(CONF_AGENT_TIMEOUT, DEFAULT_AGENT_TIMEOUT)),
+            conversation_scope=scope,
             config_entry_id=getattr(entry, "entry_id", None),
             event_exclude_text=bool(
                 opts.get(CONF_EVENT_EXCLUDE_TEXT, DEFAULT_EVENT_EXCLUDE_TEXT)

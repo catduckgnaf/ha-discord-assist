@@ -25,6 +25,13 @@ CONF_PREFER_LOCAL = "prefer_local"
 CONF_AGENT_TIMEOUT = "agent_timeout"
 CONF_PLACEHOLDER_DELAY = "placeholder_delay"
 CONF_ROOM_MAP = "room_map"
+CONF_CONVERSATION_SCOPE = "conversation_scope"
+
+# Conversation keying in channels: one shared conversation per channel, or
+# one per user in each channel. DMs are always keyed per user.
+CONVERSATION_SCOPE_CHANNEL = "channel"
+CONVERSATION_SCOPE_USER = "user"
+CONVERSATION_SCOPES = (CONVERSATION_SCOPE_CHANNEL, CONVERSATION_SCOPE_USER)
 CONF_AGENT_MAP_USER = "agent_map_user"
 CONF_AGENT_MAP_CHANNEL = "agent_map_channel"
 CONF_RATE_LIMIT_PER_MINUTE = "rate_limit_per_minute"
@@ -40,6 +47,7 @@ DEFAULT_PREFER_LOCAL = False
 # Event fired on the HA bus once per accepted Discord message.
 EVENT_MESSAGE = f"{DOMAIN}_message"
 DEFAULT_AGENT_TIMEOUT = 60
+DEFAULT_CONVERSATION_SCOPE = CONVERSATION_SCOPE_CHANNEL
 DEFAULT_RATE_LIMIT_PER_MINUTE = 10
 DEFAULT_RATE_LIMIT_BURST = 3
 DEFAULT_PLACEHOLDER_DELAY = 3.0

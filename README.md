@@ -14,6 +14,7 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 - Responds to direct messages (optional)
 - Responds to @mentions in any channel the bot can see (optional)
 - Per-conversation context window with configurable idle timeout
+- Channel conversations shared by everyone in the channel by default, with an optional per-user history scope
 - Replies in threads under the channels it listens to
 - Tells the agent who is speaking, from which channel, and the local time
 - Room channels: a channel can stand for a room, so "close the blinds" in `#den` means the den
@@ -38,6 +39,8 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 - Everyone else is ignored, even in channels the bot listens to.
 
 Requests never run without a Home Assistant user, so permissions always apply. Use a dedicated, least-privilege account as the fallback user, and limit `channels` to places you trust. If nobody is authorized, a repair issue appears under **Settings → System → Repairs**.
+
+Conversation history in a channel is shared by default: everyone who talks to the bot in a channel continues one conversation, so anything one person tells the agent is part of the history other channel members can continue, including tool results and context that never appear as Discord messages. If that is too open for a channel, set **Conversation scope** to **User** in the options so each person gets their own history in each channel; direct messages always have a per-user history. Either way, history expires after the configured idle minutes.
 
 ## Installation
 
@@ -112,6 +115,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for what is planned to make this easier.
 | Exclude message text from events | No | Omits the `text` field from the `discord_assist_message` event (see below). Event data is stored by the recorder, so turn this on if you do not want message text in your history |
 | Built-in commands first | No | Tries `conversation.home_assistant` first and only asks your agent when the built-in agent does not understand the request or finds no matching device. A command it matched but failed is not retried, so nothing runs twice |
 | Agent timeout | 60 s | Gives up and says so instead of typing forever |
+| Conversation scope | Channel | `Channel` shares one conversation history among everyone talking in a channel; `User` gives each person their own history in each channel. Direct messages always have a per-user history |
 
 ## Automations from Discord messages
 
