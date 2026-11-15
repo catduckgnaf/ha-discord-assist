@@ -70,17 +70,25 @@ async def test_setup_and_unload(hass: HomeAssistant):
         fake_client.close.assert_awaited()
 
 
-async def test_setup_wires_notes_store(hass: HomeAssistant):
-    entry = _entry()
+async def test_setup_threads_entry_id_and_event_option_to_router(
+    hass: HomeAssistant,
+):
+    entry = _entry(
+        options={
+            CONF_AGENT_ID: "conversation.ollama",
+            CONF_USER_MAP: {"7": "ha-a"},
+            "event_exclude_text": True,
+        }
+    )
     entry.add_to_hass(hass)
-    with patch(CLIENT, return_value=_fake_client()):
+    fake_client = _fake_client()
+
+    with patch(CLIENT, return_value=fake_client):
         assert await hass.config_entries.async_setup(entry.entry_id) is True
         await hass.async_block_till_done()
-    store = entry.runtime_data.notes_store
-    assert store is not None
-    assert entry.runtime_data.router.notes_store is store
-    await store.async_add_note(7, "do not ask first")
-    assert await store.async_notes_for(7) == ["do not ask first"]
+    # The client reads both from the router it is given.
+    assert entry.runtime_data.router.config_entry_id == entry.entry_id
+    assert entry.runtime_data.router.event_exclude_text is True
 
 
 async def test_login_failure_triggers_reauth(hass: HomeAssistant):
@@ -158,3 +166,16 @@ async def test_no_authorized_users_raises_repair(hass: HomeAssistant):
         DOMAIN, issue_id(ISSUE_NO_AUTHORIZED_USERS, entry.entry_id)
     )
     assert issue is not None
+
+
+async def test_setup_wires_notes_store(hass: HomeAssistant):
+    entry = _entry()
+    entry.add_to_hass(hass)
+    with patch(CLIENT, return_value=_fake_client()):
+        assert await hass.config_entries.async_setup(entry.entry_id) is True
+        await hass.async_block_till_done()
+    store = entry.runtime_data.notes_store
+    assert store is not None
+    assert entry.runtime_data.router.notes_store is store
+    await store.async_add_note(7, "do not ask first")
+    assert await store.async_notes_for(7) == ["do not ask first"]

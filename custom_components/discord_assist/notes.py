@@ -127,3 +127,8 @@ class NotesStore:
             del self._data[str(discord_user_id)]
         await self._store.async_save(self._data)
         return removed
+
+    async def async_remove(self) -> None:
+        """Delete the stored notes file (the config entry was removed)."""
+        await self._store.async_remove()
+        self._data = {}
