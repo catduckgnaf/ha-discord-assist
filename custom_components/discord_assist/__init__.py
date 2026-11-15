@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import aiohttp
 import discord
@@ -19,20 +19,26 @@ from homeassistant.helpers.device_registry import DeviceEntryType
 
 from .bot import DiscordAssistClient
 from .const import (
+    CONF_PLACEHOLDER_DELAY,
     CONF_TOKEN,
+    DEFAULT_PLACEHOLDER_DELAY,
     DOMAIN,
+    ISSUE_DUPLICATE_TOKEN,
     ISSUE_MESSAGE_CONTENT_INTENT,
     ISSUE_NO_AUTHORIZED_USERS,
+    LEGACY_DOMAIN,
     RECONNECT_DELAY,
     issue_id,
     signal_connection,
 )
 from .conversation_router import ConversationRouter
+from .notes import NotesStore
+from .recent_errors import RecentErrors
 from .timers import TimerTracker
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.BINARY_SENSOR]
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.NOTIFY]
 
 
 @dataclass
@@ -41,8 +47,10 @@ class RuntimeData:
 
     client: DiscordAssistClient
     router: ConversationRouter
-    device_id: str
-    timers: TimerTracker
+    device_id: str | None = None
+    timers: TimerTracker | None = None
+    notes_store: NotesStore | None = None
+    recent_errors: RecentErrors = field(default_factory=RecentErrors)
 
 
 type DiscordConfigEntry = ConfigEntry[RuntimeData]
@@ -64,6 +72,23 @@ def _set_issue(hass: HomeAssistant, entry: ConfigEntry, kind: str, active: bool)
         ir.async_delete_issue(hass, DOMAIN, issue_id(kind, entry.entry_id))
 
 
+def _legacy_entry_uses_same_token(hass: HomeAssistant, token: str) -> bool:
+    """Whether an enabled legacy entry is loaded with the same bot token.
+
+    Home Assistant loads every enabled config entry at startup, so an
+    enabled Discord Conversation entry with this token will run the same
+    bot in a second process. A disabled entry (for example the one left
+    behind by the import flow in the config flow) is not running and
+    does not count.
+    """
+    for legacy in hass.config_entries.async_entries(LEGACY_DOMAIN):
+        if getattr(legacy, "disabled_by", None) is not None:
+            continue
+        if legacy.data.get(CONF_TOKEN) == token:
+            return True
+    return False
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> bool:
     """Set up Discord Assist from a config entry."""
     # The integration's own device for this entry (the same device the
@@ -80,7 +105,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         entry_type=DeviceEntryType.SERVICE,
     )
 
-    router = ConversationRouter.from_entry(hass, entry)
+    notes_store = NotesStore(hass, entry.entry_id)
+    await notes_store.async_load()
+    router = ConversationRouter.from_entry(hass, entry, notes_store=notes_store)
     router.integration_device_id = device.id
     if not router.has_authorized_users:
         _LOGGER.warning(
@@ -90,8 +117,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         )
     _set_issue(hass, entry, ISSUE_NO_AUTHORIZED_USERS, not router.has_authorized_users)
     _set_issue(hass, entry, ISSUE_MESSAGE_CONTENT_INTENT, False)
+    _set_issue(
+        hass,
+        entry,
+        ISSUE_DUPLICATE_TOKEN,
+        _legacy_entry_uses_same_token(hass, entry.data.get(CONF_TOKEN, "")),
+    )
 
-    client = DiscordAssistClient(hass, router, signal_connection(entry.entry_id))
+    recent_errors = RecentErrors()
+    client = DiscordAssistClient(
+        hass,
+        router,
+        signal_connection(entry.entry_id),
+        placeholder_delay=float(
+            entry.options.get(CONF_PLACEHOLDER_DELAY, DEFAULT_PLACEHOLDER_DELAY)
+        ),
+        recent_errors=recent_errors,
+        entry_title=entry.title,
+    )
     # Log in over REST first so a dead network or bad token surfaces here,
     # where Home Assistant retries with backoff or starts reauth.
     try:
@@ -104,7 +147,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         raise ConfigEntryNotReady(f"Could not reach Discord: {err}") from err
 
     timers = TimerTracker(
-        hass, client.send_timer_message, timer_mention=router.timer_mention
+        hass,
+        client.send_timer_message,
+        timer_mention=router.timer_mention,
+        # Kept across reloads: an options save reloads the entry, and a
+        # timer started before it must still be announced after it.
+        timers=hass.data.setdefault(DOMAIN, {}).setdefault(
+            f"timers_{entry.entry_id}", {}
+        ),
     )
     router.timer_tracker = timers
     try:
@@ -121,20 +171,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         )
 
     entry.runtime_data = RuntimeData(
-        client=client, router=router, device_id=device.id, timers=timers
+        client=client,
+        router=router,
+        recent_errors=recent_errors,
+        notes_store=notes_store,
+        device_id=device.id,
+        timers=timers,
     )
 
     async def _run() -> None:
         try:
             await client.connect(reconnect=True)
-        except discord.PrivilegedIntentsRequired:
+        except discord.PrivilegedIntentsRequired as err:
+            recent_errors.record(err, source="gateway")
             _LOGGER.error(
                 "Discord refused the Message Content intent; enable it for the "
                 "bot in the Discord Developer Portal, then reload the entry"
             )
             _set_issue(hass, entry, ISSUE_MESSAGE_CONTENT_INTENT, True)
             return
-        except Exception:  # noqa: BLE001
+        except Exception as err:  # noqa: BLE001
+            recent_errors.record(err, source="gateway")
             _LOGGER.exception("Discord gateway task failed")
         if client.is_closed():
             return
@@ -163,6 +220,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> 
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Clean up repair issues when the entry is deleted."""
-    for kind in (ISSUE_NO_AUTHORIZED_USERS, ISSUE_MESSAGE_CONTENT_INTENT):
+    """Clean up repair issues and stored notes when the entry is deleted."""
+    await NotesStore(hass, entry.entry_id).async_remove()
+    hass.data.get(DOMAIN, {}).pop(f"timers_{entry.entry_id}", None)
+    for kind in (
+        ISSUE_NO_AUTHORIZED_USERS,
+        ISSUE_MESSAGE_CONTENT_INTENT,
+        ISSUE_DUPLICATE_TOKEN,
+    ):
         ir.async_delete_issue(hass, DOMAIN, issue_id(kind, entry.entry_id))

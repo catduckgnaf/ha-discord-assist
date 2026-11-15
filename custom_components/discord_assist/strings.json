@@ -20,9 +20,14 @@
           "language": "Language (blank = Home Assistant default)",
           "allowlist": "Allowed Discord user IDs (act as the fallback user; mapped users are always allowed)",
           "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
+          "event_exclude_text": "Exclude message text from the discord_assist_message event (event data is stored by the recorder)",
           "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
-          "timer_mention": "Mention the Discord user who set a timer when it finishes",
-          "agent_timeout": "Give up on the agent after this many seconds"
+          "agent_timeout": "Give up on the agent after this many seconds",
+          "conversation_scope": "Conversation history in channels (shared per channel, or separate per user)",
+          "rate_limit_per_minute": "Max requests per Discord user per minute (0 = no limit)",
+          "rate_limit_burst": "Requests a Discord user may send in a burst before the limit applies",
+          "placeholder_delay": "Show a working placeholder after this many seconds",
+          "timer_mention": "Mention the Discord user who set a timer when it finishes"
         }
       },
       "reauth_confirm": {
@@ -56,7 +61,8 @@
   "options": {
     "error": {
       "invalid_user_id": "That is not a valid Discord user ID (digits only).",
-      "invalid_channel_id": "That is not a valid Discord channel ID (digits only)."
+      "invalid_channel_id": "That is not a valid Discord channel ID (digits only).",
+      "invalid_idle_minutes": "Idle minutes must be a whole number between 1 and 240."
     },
     "step": {
       "init": {
@@ -66,7 +72,14 @@
           "add_user_map": "Add a Discord-to-Home-Assistant user mapping",
           "remove_user_map": "Remove a user mapping",
           "add_room": "Treat a channel as a room",
-          "remove_room": "Remove a room channel"
+          "remove_room": "Remove a room channel",
+          "add_channel_idle": "Set a per-channel idle reset",
+          "remove_channel_idle": "Remove a per-channel idle reset",
+          "add_agent_user": "Use a specific agent for a Discord user",
+          "remove_agent_user": "Remove a per-user agent",
+          "add_agent_channel": "Use a specific agent in a channel",
+          "remove_agent_channel": "Remove a per-channel agent",
+          "remove_note": "View and remove standing preferences (notes)"
         }
       },
       "settings": {
@@ -81,9 +94,14 @@
           "allowlist": "Allowed Discord user IDs (act as the fallback user; mapped users are always allowed)",
           "fallback_ha_user": "Fallback Home Assistant user for unmapped Discord users",
           "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
+          "event_exclude_text": "Exclude message text from the discord_assist_message event (event data is stored by the recorder)",
           "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
-          "timer_mention": "Mention the Discord user who set a timer when it finishes",
-          "agent_timeout": "Give up on the agent after this many seconds"
+          "agent_timeout": "Give up on the agent after this many seconds",
+          "conversation_scope": "Conversation history in channels (shared per channel, or separate per user)",
+          "rate_limit_per_minute": "Max requests per Discord user per minute (0 = no limit)",
+          "rate_limit_burst": "Requests a Discord user may send in a burst before the limit applies",
+          "placeholder_delay": "Show a working placeholder after this many seconds",
+          "timer_mention": "Mention the Discord user who set a timer when it finishes"
         }
       },
       "add_user_map": {
@@ -112,10 +130,63 @@
         "data": {
           "channel_id": "Discord channel ID"
         }
+      },
+      "add_channel_idle": {
+        "title": "Per-channel idle reset",
+        "description": "Minutes of inactivity before the conversation in this channel resets, overriding the general idle setting. This only controls when Discord Assist drops the conversation; Home Assistant itself expires chat sessions for core agents after 5 idle minutes.",
+        "data": {
+          "channel_id": "Discord channel",
+          "idle_minutes": "Idle minutes for this channel"
+        }
+      },
+      "remove_channel_idle": {
+        "title": "Remove per-channel idle reset",
+        "data": {
+          "channel_id": "Discord channel ID"
+        }
+      },
+      "add_agent_user": {
+        "title": "Agent for a user",
+        "description": "This Discord user always talks to the chosen agent, in any channel. A user agent wins over a channel agent and the default agent.",
+        "data": {
+          "discord_user_id": "Discord user ID",
+          "agent_id": "Conversation agent"
+        }
+      },
+      "remove_agent_user": {
+        "title": "Remove per-user agent",
+        "data": {
+          "discord_user_id": "Discord user ID"
+        }
+      },
+      "add_agent_channel": {
+        "title": "Agent for a channel",
+        "description": "Requests in this channel and its threads use the chosen agent, unless the user has their own agent.",
+        "data": {
+          "channel_id": "Discord channel",
+          "agent_id": "Conversation agent"
+        }
+      },
+      "remove_agent_channel": {
+        "title": "Remove per-channel agent",
+        "data": {
+          "channel_id": "Discord channel ID"
+        }
+      },
+      "remove_note": {
+        "title": "Standing preferences (notes)",
+        "description": "Every saved note is listed with its Discord user ID and number. Picking one removes it. Notes are added from Discord by sending a remember message.",
+        "data": {
+          "note_key": "Note to remove"
+        }
       }
     },
     "abort": {
-      "no_rooms": "No channels are mapped to rooms."
+      "no_rooms": "No channels are mapped to rooms.",
+      "no_channel_idle": "No channels have a per-channel idle reset.",
+      "no_user_agents": "No Discord users have their own agent.",
+      "no_channel_agents": "No channels have their own agent.",
+      "no_notes": "No standing preferences are saved yet."
     }
   },
   "entity": {
@@ -133,6 +204,10 @@
     "message_content_intent": {
       "title": "{entry_title} needs the Message Content intent",
       "description": "Discord refused the gateway connection because the bot does not have the Message Content privileged intent. Enable it under Bot > Privileged Gateway Intents in the Discord Developer Portal, then reload the integration."
+    },
+    "duplicate_token": {
+      "title": "{entry_title} bot token is also running elsewhere",
+      "description": "A message from this bot was seen that this Home Assistant instance did not send, or a Discord Conversation entry with the same bot token is loaded. That means the same bot token is used somewhere else. If it is another gateway client, such as the old Discord Conversation integration or a test bot, both receive every message, both may answer, and actions may run twice: stop it, or disable or remove the entry that uses the same token, then reload this integration. Home Assistant's Discord notify integration with the same token also triggers this; it only sends messages, so it is harmless, but a separate bot token for it avoids the warning."
     }
   }
 }

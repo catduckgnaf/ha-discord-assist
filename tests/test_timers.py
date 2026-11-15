@@ -320,3 +320,38 @@ async def test_setup_registers_timer_handler_and_unload_unregisters(
     assert await hass.config_entries.async_unload(entry.entry_id) is True
     await hass.async_block_till_done()
     assert async_device_supports_timers(hass, device.id) is False
+
+
+async def test_concurrent_requests_credit_their_own_timer():
+    """Two requests in flight at once: each timer goes to its own origin."""
+    posts = []
+
+    async def poster(channel_id, text, mention):
+        posts.append((channel_id, text, mention))
+
+    tracker = TimerTracker(SimpleNamespace(), poster)
+    a_inside = asyncio.Event()
+    b_inside = asyncio.Event()
+
+    async def request(origin, timer_id, my_event, other_event):
+        async with tracker.track_request(origin):
+            my_event.set()
+            await other_event.wait()
+            # Both requests are now inside track_request at the same time.
+            tracker.handle_event(TimerEventType.STARTED, _timer(timer_id))
+
+    await asyncio.gather(
+        request(TimerOrigin(111, 7), "t-a", a_inside, b_inside),
+        request(TimerOrigin(222, 8), "t-b", b_inside, a_inside),
+    )
+    assert tracker._timers["t-a"] == TimerOrigin(111, 7)
+    assert tracker._timers["t-b"] == TimerOrigin(222, 8)
+
+
+def test_timer_map_survives_a_new_tracker():
+    """An entry reload builds a new tracker over the same kept map."""
+    kept = {}
+    first = TimerTracker(SimpleNamespace(), AsyncMock(), timers=kept)
+    first._timers["t-1"] = TimerOrigin(111, 7)
+    second = TimerTracker(SimpleNamespace(), AsyncMock(), timers=kept)
+    assert second._timers["t-1"] == TimerOrigin(111, 7)

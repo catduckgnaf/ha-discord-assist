@@ -23,6 +23,7 @@ import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 from homeassistant.components.intent import TimerEventType, TimerInfo
@@ -42,6 +43,15 @@ class TimerOrigin:
 
     channel_id: int
     discord_user_id: int
+
+
+# The request whose turn is running in this task. Core calls the timer
+# handler synchronously from inside the intent handling our converse call
+# started, so the handler sees the context of exactly that request, never a
+# concurrent one for another channel or user.
+_CURRENT_ORIGIN: ContextVar[TimerOrigin | None] = ContextVar(
+    "discord_assist_timer_origin", default=None
+)
 
 
 def _clean_label(value: str | None) -> str | None:
@@ -67,35 +77,35 @@ class TimerTracker:
     """Correlates Assist timers with the Discord requests that started them."""
 
     def __init__(
-        self, hass: HomeAssistant, poster: TimerPoster, *, timer_mention: bool = False
+        self,
+        hass: HomeAssistant,
+        poster: TimerPoster,
+        *,
+        timer_mention: bool = False,
+        timers: dict[str, TimerOrigin] | None = None,
     ) -> None:
         self._hass = hass
         self._poster = poster
         self.timer_mention = timer_mention
-        # Timer id -> where it was started from.
-        self._timers: dict[str, TimerOrigin] = {}
-        # Origins of requests currently being conversed, most recent last.
-        # The timer handler fires synchronously while a request is in flight,
-        # so the top of this stack is the request that started the timer.
-        self._pending: list[TimerOrigin] = []
+        # Timer id -> where it was started from. The caller may pass a map
+        # that outlives this tracker (entry reloads).
+        self._timers: dict[str, TimerOrigin] = {} if timers is None else timers
 
     @asynccontextmanager
     async def track_request(self, origin: TimerOrigin) -> AsyncIterator[None]:
-        """Mark ``origin`` as the request in flight for timer correlation."""
-        self._pending.append(origin)
+        """Mark ``origin`` as this task's request for timer correlation."""
+        token = _CURRENT_ORIGIN.set(origin)
         try:
             yield
         finally:
-            try:
-                self._pending.remove(origin)
-            except ValueError:
-                pass
+            _CURRENT_ORIGIN.reset(token)
 
     def handle_event(self, event_type: TimerEventType, timer: TimerInfo) -> None:
         """Timer handler registered with Home Assistant for the entry device."""
         if event_type in (TimerEventType.STARTED, TimerEventType.UPDATED):
-            if timer.id not in self._timers and self._pending:
-                self._timers[timer.id] = self._pending[-1]
+            origin = _CURRENT_ORIGIN.get()
+            if timer.id not in self._timers and origin is not None:
+                self._timers[timer.id] = origin
         elif event_type == TimerEventType.CANCELLED:
             self._timers.pop(timer.id, None)
         elif event_type == TimerEventType.FINISHED:
