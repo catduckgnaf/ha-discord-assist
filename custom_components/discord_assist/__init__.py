@@ -16,7 +16,9 @@ from homeassistant.helpers import issue_registry as ir
 
 from .bot import DiscordAssistClient
 from .const import (
+    CONF_PLACEHOLDER_DELAY,
     CONF_TOKEN,
+    DEFAULT_PLACEHOLDER_DELAY,
     DOMAIN,
     ISSUE_MESSAGE_CONTENT_INTENT,
     ISSUE_NO_AUTHORIZED_USERS,
@@ -70,7 +72,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
     _set_issue(hass, entry, ISSUE_NO_AUTHORIZED_USERS, not router.has_authorized_users)
     _set_issue(hass, entry, ISSUE_MESSAGE_CONTENT_INTENT, False)
 
-    client = DiscordAssistClient(hass, router, signal_connection(entry.entry_id))
+    client = DiscordAssistClient(
+        hass,
+        router,
+        signal_connection(entry.entry_id),
+        placeholder_delay=float(
+            entry.options.get(CONF_PLACEHOLDER_DELAY, DEFAULT_PLACEHOLDER_DELAY)
+        ),
+    )
     # Log in over REST first so a dead network or bad token surfaces here,
     # where Home Assistant retries with backoff or starts reauth.
     try:

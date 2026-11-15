@@ -43,6 +43,7 @@ from .const import (
     CONF_FALLBACK_USER,
     CONF_IDLE_MINUTES,
     CONF_LANGUAGE,
+    CONF_PLACEHOLDER_DELAY,
     CONF_PREFER_LOCAL,
     CONF_RESPOND_DMS,
     CONF_RESPOND_MENTIONS,
@@ -52,6 +53,7 @@ from .const import (
     CONF_USER_MAP,
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_IDLE_MINUTES,
+    DEFAULT_PLACEHOLDER_DELAY,
     DEFAULT_PREFER_LOCAL,
     DEFAULT_RESPOND_DMS,
     DEFAULT_RESPOND_MENTIONS,
@@ -113,6 +115,17 @@ def build_config_schema(channel_options: list[SelectOptionDict]) -> vol.Schema:
                 NumberSelectorConfig(
                     min=5,
                     max=600,
+                    step=1,
+                    mode=NumberSelectorMode.BOX,
+                    unit_of_measurement="s",
+                )
+            ),
+            vol.Optional(
+                CONF_PLACEHOLDER_DELAY, default=DEFAULT_PLACEHOLDER_DELAY
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=60,
                     step=1,
                     mode=NumberSelectorMode.BOX,
                     unit_of_measurement="s",
