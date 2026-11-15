@@ -5,6 +5,13 @@ import discord
 
 from custom_components.discord_assist.bot import TIMEOUT_REPLY, DiscordAssistClient
 from custom_components.discord_assist.conversation_router import AgentTimeout
+from tests.fake_discord import (
+    FakeDMChannel,
+    FakeTextChannel,
+    FakeThread,
+    FakeUser,
+    assert_first_send_is_reply,
+)
 
 
 def _message(
@@ -17,31 +24,20 @@ def _message(
     parent_id=None,
 ):
     if is_dm:
-        channel = MagicMock(spec=discord.DMChannel)
+        channel = FakeDMChannel(id=channel_id)
     elif parent_id is not None:
-        channel = MagicMock(spec=discord.Thread)
-        channel.parent_id = parent_id
+        channel = FakeThread(id=channel_id, parent_id=parent_id)
     else:
-        channel = MagicMock(spec=discord.TextChannel)
-    channel.id = channel_id
-    channel.send = AsyncMock()
-    typing_cm = MagicMock()
-    typing_cm.__aenter__ = AsyncMock()
-    typing_cm.__aexit__ = AsyncMock(return_value=False)
-    channel.typing = MagicMock(return_value=typing_cm)
-    msg = SimpleNamespace(
-        content=content,
-        channel=channel,
-        author=SimpleNamespace(id=7, bot=author_bot, display_name="Catduck"),
+        channel = FakeTextChannel(id=channel_id)
+    return channel.receive_message(
+        content,
+        author=FakeUser(id=7, bot=author_bot, display_name="Catduck"),
         mentions=mentions or [],
     )
-    msg.ref = SimpleNamespace(message_id=1)
-    msg.to_reference = MagicMock(return_value=msg.ref)
-    return msg
 
 
 def _first_send(msg):
-    return msg.channel.send.await_args_list[0]
+    return msg.channel.send_calls[0]
 
 
 def _client(router, monkeypatch):
@@ -61,13 +57,14 @@ async def test_on_message_dispatches_and_replies(monkeypatch):
     router.should_respond.return_value = True
     router.process = AsyncMock(return_value="The light is on.")
     client = _client(router, monkeypatch)
-    msg = _message("<@999> is the light on?", mentions=[SimpleNamespace(id=999)])
+    msg = _message("<@999> is the light on?", mentions=[FakeUser(id=999)])
     await client.on_message(msg)
     router.process.assert_awaited_once()
-    msg.channel.send.assert_awaited_once_with(
-        "The light is on.", reference=msg.ref, mention_author=False
-    )
-    msg.to_reference.assert_called_once_with(fail_if_not_exists=False)
+    assert len(msg.channel.sent) == 1
+    call = assert_first_send_is_reply(msg.channel, to=msg)
+    assert call.content == "The light is on."
+    assert call.kwargs["mention_author"] is False
+    assert msg.to_reference_calls == [{"fail_if_not_exists": False}]
     where = router.process.call_args.kwargs["where"]
     assert where.display_name == "Catduck"
     assert where.channel_id == 111
@@ -95,10 +92,10 @@ async def test_on_message_posts_apology_on_error(monkeypatch):
     router.should_respond.return_value = True
     router.process = AsyncMock(side_effect=RuntimeError("boom"))
     client = _client(router, monkeypatch)
-    msg = _message("<@999> hi", mentions=[SimpleNamespace(id=999)])
+    msg = _message("<@999> hi", mentions=[FakeUser(id=999)])
     await client.on_message(msg)
-    sent = msg.channel.send.await_args.args[0]
-    assert "error" in sent.lower()
+    sent = msg.channel.sent[0]
+    assert "error" in sent.content.lower()
 
 
 async def test_on_message_replies_when_typing_fails(monkeypatch):
@@ -108,21 +105,17 @@ async def test_on_message_replies_when_typing_fails(monkeypatch):
     router.process = AsyncMock(return_value="Lights are off.")
     client = _client(router, monkeypatch)
 
-    msg = _message("<@999> lights?", mentions=[SimpleNamespace(id=999)])
+    msg = _message("<@999> lights?", mentions=[FakeUser(id=999)])
     # Make the typing context manager raise on enter
-    typing_cm = MagicMock()
-    typing_cm.__aenter__ = AsyncMock(
-        side_effect=discord.HTTPException(MagicMock(), "forbidden")
-    )
-    typing_cm.__aexit__ = AsyncMock(return_value=False)
-    msg.channel.typing = MagicMock(return_value=typing_cm)
+    msg.channel.typing_enter_error = discord.HTTPException(MagicMock(), "forbidden")
 
     await client.on_message(msg)
 
     router.process.assert_awaited_once()
-    msg.channel.send.assert_awaited_once_with(
-        "Lights are off.", reference=msg.ref, mention_author=False
-    )
+    assert len(msg.channel.sent) == 1
+    call = assert_first_send_is_reply(msg.channel, to=msg)
+    assert call.content == "Lights are off."
+    assert call.kwargs["mention_author"] is False
 
 
 async def test_on_message_does_not_raise_when_send_fails(monkeypatch):
@@ -132,13 +125,12 @@ async def test_on_message_does_not_raise_when_send_fails(monkeypatch):
     router.process = AsyncMock(return_value="Reply text.")
     client = _client(router, monkeypatch)
 
-    msg = _message("<@999> hello", mentions=[SimpleNamespace(id=999)])
-    msg.channel.send = AsyncMock(
-        side_effect=discord.HTTPException(MagicMock(), "missing permissions")
-    )
+    msg = _message("<@999> hello", mentions=[FakeUser(id=999)])
+    msg.channel.send_error = discord.HTTPException(MagicMock(), "missing permissions")
 
     # Must not raise
     await client.on_message(msg)
+    assert msg.channel.sent == []
 
 
 def test_client_disables_all_mentions():
@@ -177,9 +169,9 @@ async def test_on_message_replies_on_timeout(monkeypatch):
     router.should_respond.return_value = True
     router.process = AsyncMock(side_effect=AgentTimeout())
     client = _client(router, monkeypatch)
-    msg = _message("<@999> hi", mentions=[SimpleNamespace(id=999)])
+    msg = _message("<@999> hi", mentions=[FakeUser(id=999)])
     await client.on_message(msg)
-    assert _first_send(msg).args[0] == TIMEOUT_REPLY
+    assert _first_send(msg).content == TIMEOUT_REPLY
 
 
 async def test_long_reply_only_first_piece_is_a_reply(monkeypatch):
@@ -187,11 +179,12 @@ async def test_long_reply_only_first_piece_is_a_reply(monkeypatch):
     router.should_respond.return_value = True
     router.process = AsyncMock(return_value="word\n" * 1000)
     client = _client(router, monkeypatch)
-    msg = _message("<@999> essay", mentions=[SimpleNamespace(id=999)])
+    msg = _message("<@999> essay", mentions=[FakeUser(id=999)])
     await client.on_message(msg)
-    calls = msg.channel.send.await_args_list
+    calls = msg.channel.send_calls
     assert len(calls) > 1
-    assert calls[0].kwargs == {"reference": msg.ref, "mention_author": False}
+    assert_first_send_is_reply(msg.channel, to=msg)
+    assert calls[0].kwargs["mention_author"] is False
     assert all(c.kwargs == {} for c in calls[1:])
 
 
@@ -201,16 +194,11 @@ async def test_typing_failure_after_answer_does_not_rerun_agent(monkeypatch):
     router.should_respond.return_value = True
     router.process = AsyncMock(return_value="Unlocked.")
     client = _client(router, monkeypatch)
-    msg = _message("<@999> unlock", mentions=[SimpleNamespace(id=999)])
-    typing_cm = MagicMock()
-    typing_cm.__aenter__ = AsyncMock()
-    typing_cm.__aexit__ = AsyncMock(
-        side_effect=discord.HTTPException(MagicMock(), "gone")
-    )
-    msg.channel.typing = MagicMock(return_value=typing_cm)
+    msg = _message("<@999> unlock", mentions=[FakeUser(id=999)])
+    msg.channel.typing_exit_error = discord.HTTPException(MagicMock(), "gone")
     await client.on_message(msg)
     router.process.assert_awaited_once()
-    assert _first_send(msg).args[0] == "Unlocked."
+    assert _first_send(msg).content == "Unlocked."
 
 
 async def test_dm_has_no_channel_name(monkeypatch):
