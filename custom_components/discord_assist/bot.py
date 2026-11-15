@@ -8,6 +8,7 @@ import discord
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
+from .buttons import ButtonStore, async_handle_button_press, record_id_from_custom_id
 from .conversation_router import (
     AgentTimeout,
     ConversationRouter,
@@ -27,7 +28,11 @@ class DiscordAssistClient(discord.Client):
     """Listens for messages and routes them to the HA conversation agent."""
 
     def __init__(
-        self, hass: HomeAssistant, router: ConversationRouter, status_signal: str
+        self,
+        hass: HomeAssistant,
+        router: ConversationRouter,
+        status_signal: str,
+        button_store: ButtonStore | None = None,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -40,6 +45,7 @@ class DiscordAssistClient(discord.Client):
         self.router = router
         self.connected = False
         self._status_signal = status_signal
+        self.button_store = button_store
 
     def _set_connected(self, connected: bool) -> None:
         if connected != self.connected:
@@ -54,6 +60,31 @@ class DiscordAssistClient(discord.Client):
 
     async def on_disconnect(self) -> None:
         self._set_connected(False)
+
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """Route action-button presses to the button dispatcher.
+
+        A press re-reads the entity state the button was posted against
+        before anything fires (see buttons.async_handle_button_press).
+        Other interactions (slash commands, unrelated components) are not
+        this client's business yet.
+        """
+        if self.button_store is None:
+            return
+        if interaction.type != discord.InteractionType.component:
+            return
+        custom_id = (interaction.data or {}).get("custom_id")
+        if record_id_from_custom_id(custom_id) is None:
+            return
+        try:
+            await async_handle_button_press(
+                self.hass,
+                store=self.button_store,
+                router=self.router,
+                interaction=interaction,
+            )
+        except Exception:  # noqa: BLE001 - never let the gateway die
+            _LOGGER.exception("Button press handling failed")
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author == self.user or message.author.bot:

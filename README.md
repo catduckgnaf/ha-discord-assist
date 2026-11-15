@@ -115,6 +115,10 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for what is planned to make this easier.
 
 A voice satellite knows which room it is in; a Discord channel does not, unless you tell it. In options, choose **Treat a channel as a room**, pick the channel, and pick any device in that room's area. Messages in that channel and its threads are sent with that device, so the built-in agent and LLM agents using Home Assistant's Assist API treat the device's area as the default room. With speaker context on, the room name is also in the prompt for agents that read it.
 
+## Action buttons check state first
+
+Action buttons posted by the integration remember the entities they act on, along with each entity's state and `last_changed` at post time. When someone presses a button, the integration re-reads those entities before firing the `discord_assist_action` event: if any state changed (or an entity disappeared), the press is refused with an ephemeral "Nothing changed" explanation, no event fires, and the buttons are removed from the message. Buttons are single-use and expire after an hour by default.
+
 ## User mapping
 
 Map a Discord user ID to a specific Home Assistant user so commands run with that user's permissions.
