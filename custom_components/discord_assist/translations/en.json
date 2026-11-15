@@ -55,7 +55,10 @@
   "options": {
     "error": {
       "invalid_user_id": "That is not a valid Discord user ID (digits only).",
-      "invalid_channel_id": "That is not a valid Discord channel ID (digits only)."
+      "invalid_role_id": "That is not a valid Discord role ID (digits only).",
+      "invalid_channel_id": "That is not a valid Discord channel ID (digits only).",
+      "invalid_profile": "That profile does not exist.",
+      "profile_exists": "A profile with that name already exists."
     },
     "step": {
       "init": {
@@ -65,7 +68,12 @@
           "add_user_map": "Add a Discord-to-Home-Assistant user mapping",
           "remove_user_map": "Remove a user mapping",
           "add_room": "Treat a channel as a room",
-          "remove_room": "Remove a room channel"
+          "remove_room": "Remove a room channel",
+          "add_profile": "Add an access profile",
+          "edit_profile": "Edit an access profile",
+          "remove_profile": "Remove an access profile",
+          "add_profile_map": "Assign a profile to a user or role",
+          "remove_profile_map": "Remove a profile assignment"
         }
       },
       "settings": {
@@ -110,10 +118,65 @@
         "data": {
           "channel_id": "Discord channel ID"
         }
+      },
+      "add_profile": {
+        "title": "Add access profile",
+        "description": "Leave the Home Assistant user blank to make a deny profile: anyone assigned to it is ignored, and a deny assignment beats any allow assignment. Areas, domains and confirm domains are stored now and enforced in a later phase.",
+        "data": {
+          "name": "Profile name",
+          "ha_user": "Home Assistant user (blank = deny profile)",
+          "channels": "Allowed Discord channel IDs (comma separated, blank = global channel settings)",
+          "dms": "Allow direct messages",
+          "quiet_hours": "Quiet hours, for example 21:00-07:00 (blank = none)",
+          "rate_limit": "Maximum requests per minute (blank = no limit)",
+          "agent": "Conversation agent for this profile (blank = default agent)",
+          "areas": "Areas (comma separated, stored for a later phase)",
+          "domains": "Domains (comma separated, stored for a later phase)",
+          "confirm": "Confirm domains (comma separated, stored for a later phase)"
+        }
+      },
+      "edit_profile": {
+        "title": "Edit access profile",
+        "description": "Saving replaces the profile's settings. Leave the Home Assistant user blank to make it a deny profile.",
+        "data": {
+          "name": "Profile name",
+          "ha_user": "Home Assistant user (blank = deny profile)",
+          "channels": "Allowed Discord channel IDs (comma separated, blank = global channel settings)",
+          "dms": "Allow direct messages",
+          "quiet_hours": "Quiet hours, for example 21:00-07:00 (blank = none)",
+          "rate_limit": "Maximum requests per minute (blank = no limit)",
+          "agent": "Conversation agent for this profile (blank = default agent)",
+          "areas": "Areas (comma separated, stored for a later phase)",
+          "domains": "Domains (comma separated, stored for a later phase)",
+          "confirm": "Confirm domains (comma separated, stored for a later phase)"
+        }
+      },
+      "remove_profile": {
+        "title": "Remove access profile",
+        "data": {
+          "name": "Profile name"
+        }
+      },
+      "add_profile_map": {
+        "title": "Assign a profile",
+        "description": "Assign a profile to a Discord user ID or a Discord role ID. A user assignment beats a role assignment; a deny profile beats any allow profile.",
+        "data": {
+          "kind": "Assign by",
+          "target_id": "Discord user or role ID",
+          "profile": "Profile"
+        }
+      },
+      "remove_profile_map": {
+        "title": "Remove a profile assignment",
+        "data": {
+          "kind": "Assigned by",
+          "target_id": "Discord user or role ID"
+        }
       }
     },
     "abort": {
-      "no_rooms": "No channels are mapped to rooms."
+      "no_rooms": "No channels are mapped to rooms.",
+      "no_profiles": "No access profiles are defined yet."
     }
   },
   "entity": {

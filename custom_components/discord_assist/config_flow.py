@@ -44,6 +44,9 @@ from .const import (
     CONF_IDLE_MINUTES,
     CONF_LANGUAGE,
     CONF_PREFER_LOCAL,
+    CONF_PROFILE_ROLE_MAP,
+    CONF_PROFILE_USER_MAP,
+    CONF_PROFILES,
     CONF_RESPOND_DMS,
     CONF_RESPOND_MENTIONS,
     CONF_ROOM_MAP,
@@ -258,6 +261,55 @@ class DiscordAssistConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
 
+def _csv(value) -> list[str]:
+    """Split a comma-separated form field into trimmed non-empty parts."""
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def _profile_dict_from_input(user_input: dict[str, Any]) -> dict[str, Any]:
+    """Stored form of a profile, from the add/edit profile form fields.
+
+    ``areas``, ``domains`` and ``confirm`` are stored now and only
+    enforced in phases B and C. A blank Home Assistant user makes this a
+    deny profile.
+    """
+    rate_limit = user_input.get("rate_limit")
+    return {
+        "ha_user": user_input.get("ha_user") or None,
+        "channels": _csv(user_input.get("channels")),
+        "dms": bool(user_input.get("dms", True)),
+        "quiet_hours": user_input.get("quiet_hours") or None,
+        "rate_limit": int(rate_limit) if rate_limit not in (None, "") else None,
+        "agent": user_input.get("agent") or None,
+        "areas": _csv(user_input.get("areas")),
+        "domains": _csv(user_input.get("domains")),
+        "confirm": _csv(user_input.get("confirm")),
+    }
+
+
+def _profile_fields(user_options: list[SelectOptionDict]) -> dict:
+    """Form fields shared by the add and edit profile steps."""
+    return {
+        vol.Optional("ha_user"): SelectSelector(
+            SelectSelectorConfig(options=user_options, mode=SelectSelectorMode.DROPDOWN)
+        ),
+        vol.Optional("channels", default=""): TextSelector(),
+        vol.Optional("dms", default=True): BooleanSelector(),
+        vol.Optional("quiet_hours", default=""): TextSelector(),
+        vol.Optional("rate_limit"): NumberSelector(
+            NumberSelectorConfig(min=0, max=1000, step=1, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional("agent"): EntitySelector(
+            EntitySelectorConfig(
+                filter=EntityFilterSelectorConfig(domain="conversation")
+            )
+        ),
+        vol.Optional("areas", default=""): TextSelector(),
+        vol.Optional("domains", default=""): TextSelector(),
+        vol.Optional("confirm", default=""): TextSelector(),
+    }
+
+
 async def _ha_user_options(hass: HomeAssistant) -> list[SelectOptionDict]:
     """Build SelectOptionDict list from active, non-system HA users."""
     users = await hass.auth.async_get_users()
@@ -289,6 +341,11 @@ class DiscordAssistOptionsFlow(OptionsFlowWithReload):
                 "remove_user_map",
                 "add_room",
                 "remove_room",
+                "add_profile",
+                "edit_profile",
+                "remove_profile",
+                "add_profile_map",
+                "remove_profile_map",
             ],
         )
 
@@ -411,3 +468,166 @@ class DiscordAssistOptionsFlow(OptionsFlowWithReload):
             return self.async_abort(reason="no_rooms")
         schema = vol.Schema({vol.Required("channel_id"): vol.In(sorted(room_map))})
         return self.async_show_form(step_id="remove_room", data_schema=schema)
+
+    def _profiles(self) -> dict[str, Any]:
+        return dict(self.config_entry.options.get(CONF_PROFILES, {}))
+
+    def _save_options(self, updates: dict[str, Any]) -> ConfigFlowResult:
+        merged = dict(self.config_entry.options)
+        merged.update(updates)
+        return self.async_create_entry(title="", data=merged)
+
+    async def async_step_add_profile(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            name = str(user_input.get("name", "")).strip()
+            profiles = self._profiles()
+            if not name:
+                errors["base"] = "invalid_profile"
+            elif name in profiles:
+                errors["base"] = "profile_exists"
+            elif not all(part.isdigit() for part in _csv(user_input.get("channels"))):
+                errors["base"] = "invalid_channel_id"
+            else:
+                profiles[name] = _profile_dict_from_input(user_input)
+                return self._save_options({CONF_PROFILES: profiles})
+
+        user_options = await _ha_user_options(self.hass)
+        schema = vol.Schema(
+            {vol.Required("name"): TextSelector(), **_profile_fields(user_options)}
+        )
+        return self.async_show_form(
+            step_id="add_profile", data_schema=schema, errors=errors
+        )
+
+    async def async_step_edit_profile(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        profiles = self._profiles()
+        if not profiles:
+            return self.async_abort(reason="no_profiles")
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            name = str(user_input.get("name", "")).strip()
+            if name not in profiles:
+                errors["base"] = "invalid_profile"
+            elif not all(part.isdigit() for part in _csv(user_input.get("channels"))):
+                errors["base"] = "invalid_channel_id"
+            else:
+                profiles[name] = _profile_dict_from_input(user_input)
+                return self._save_options({CONF_PROFILES: profiles})
+
+        user_options = await _ha_user_options(self.hass)
+        schema = vol.Schema(
+            {
+                vol.Required("name"): vol.In(sorted(profiles)),
+                **_profile_fields(user_options),
+            }
+        )
+        return self.async_show_form(
+            step_id="edit_profile", data_schema=schema, errors=errors
+        )
+
+    async def async_step_remove_profile(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        profiles = self._profiles()
+        if not profiles:
+            return self.async_abort(reason="no_profiles")
+        if user_input is not None:
+            name = str(user_input["name"])
+            profiles.pop(name, None)
+            updates: dict[str, Any] = {CONF_PROFILES: profiles}
+            # Drop mappings that pointed at the removed profile.
+            for key in (CONF_PROFILE_USER_MAP, CONF_PROFILE_ROLE_MAP):
+                mapping = {
+                    target: profile
+                    for target, profile in dict(
+                        self.config_entry.options.get(key, {})
+                    ).items()
+                    if profile != name
+                }
+                updates[key] = mapping
+            return self._save_options(updates)
+
+        schema = vol.Schema({vol.Required("name"): vol.In(sorted(profiles))})
+        return self.async_show_form(step_id="remove_profile", data_schema=schema)
+
+    async def async_step_add_profile_map(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Assign a profile to a Discord user id or a Discord role id."""
+        profiles = self._profiles()
+        if not profiles:
+            return self.async_abort(reason="no_profiles")
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            kind = str(user_input.get("kind", "user"))
+            target_id = str(user_input.get("target_id", "")).strip()
+            profile = str(user_input.get("profile", ""))
+            if not target_id.isdigit():
+                errors["base"] = (
+                    "invalid_user_id" if kind == "user" else "invalid_role_id"
+                )
+            elif profile not in profiles:
+                errors["base"] = "invalid_profile"
+            else:
+                key = CONF_PROFILE_USER_MAP if kind == "user" else CONF_PROFILE_ROLE_MAP
+                mapping = dict(self.config_entry.options.get(key, {}))
+                mapping[target_id] = profile
+                return self._save_options({key: mapping})
+
+        schema = vol.Schema(
+            {
+                vol.Required("kind", default="user"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value="user", label="Discord user"),
+                            SelectOptionDict(value="role", label="Discord role"),
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required("target_id"): TextSelector(),
+                vol.Required("profile"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=name, label=name)
+                            for name in sorted(profiles)
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="add_profile_map", data_schema=schema, errors=errors
+        )
+
+    async def async_step_remove_profile_map(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            kind = str(user_input.get("kind", "user"))
+            key = CONF_PROFILE_USER_MAP if kind == "user" else CONF_PROFILE_ROLE_MAP
+            mapping = dict(self.config_entry.options.get(key, {}))
+            mapping.pop(str(user_input.get("target_id", "")).strip(), None)
+            return self._save_options({key: mapping})
+
+        schema = vol.Schema(
+            {
+                vol.Required("kind", default="user"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value="user", label="Discord user"),
+                            SelectOptionDict(value="role", label="Discord role"),
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required("target_id"): TextSelector(),
+            }
+        )
+        return self.async_show_form(step_id="remove_profile_map", data_schema=schema)

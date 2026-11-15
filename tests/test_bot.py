@@ -220,3 +220,24 @@ async def test_dm_has_no_channel_name(monkeypatch):
     client = _client(router, monkeypatch)
     await client.on_message(_message("hello", is_dm=True))
     assert router.process.call_args.kwargs["where"].channel_name is None
+
+
+async def test_on_message_passes_member_roles(monkeypatch):
+    """Guild members pass their role ids to the router; DMs pass none."""
+    router = MagicMock()
+    router.should_respond.return_value = False
+    client = _client(router, monkeypatch)
+    msg = _message("hi")
+    member = MagicMock(spec=discord.Member)
+    member.id = 7
+    member.bot = False
+    member.display_name = "Catduck"
+    member.roles = [SimpleNamespace(id=50), SimpleNamespace(id=60)]
+    msg.author = member
+    await client.on_message(msg)
+    assert router.should_respond.call_args.kwargs["role_ids"] == [50, 60]
+
+    router.should_respond.reset_mock()
+    dm_msg = _message("hi", is_dm=True)
+    await client.on_message(dm_msg)
+    assert router.should_respond.call_args.kwargs["role_ids"] == []
