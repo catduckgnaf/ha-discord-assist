@@ -8,27 +8,46 @@ from dataclasses import dataclass
 
 import aiohttp
 import discord
+import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+    ServiceValidationError,
+)
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.event import async_track_time_interval
 
 from .bot import DiscordAssistClient
+from .button_store import ButtonStore
 from .const import (
     CONF_TOKEN,
     DOMAIN,
     ISSUE_MESSAGE_CONTENT_INTENT,
     ISSUE_NO_AUTHORIZED_USERS,
     RECONNECT_DELAY,
+    SERVICE_RETIRE_MESSAGE,
     issue_id,
     signal_connection,
 )
 from .conversation_router import ConversationRouter
+from .retire import PRUNE_INTERVAL, async_prune_expired, async_retire_taken
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [Platform.BINARY_SENSOR]
+
+RETIRE_MESSAGE_SCHEMA = vol.Schema(
+    {
+        vol.Required("config_entry_id"): cv.string,
+        vol.Required("channel_id"): vol.Coerce(int),
+        vol.Required("message_id"): vol.Coerce(int),
+        vol.Optional("outcome"): cv.string,
+    }
+)
 
 
 @dataclass
@@ -37,6 +56,7 @@ class RuntimeData:
 
     client: DiscordAssistClient
     router: ConversationRouter
+    button_store: ButtonStore
 
 
 type DiscordConfigEntry = ConfigEntry[RuntimeData]
@@ -56,6 +76,45 @@ def _set_issue(hass: HomeAssistant, entry: ConfigEntry, kind: str, active: bool)
         )
     else:
         ir.async_delete_issue(hass, DOMAIN, issue_id(kind, entry.entry_id))
+
+
+def _async_register_retire_service(hass: HomeAssistant) -> None:
+    """Register the domain-wide retire_message service once."""
+    if hass.services.has_service(DOMAIN, SERVICE_RETIRE_MESSAGE):
+        return
+
+    async def _retire_message(call: ServiceCall) -> None:
+        entry_id = call.data["config_entry_id"]
+        entry = hass.config_entries.async_get_entry(entry_id)
+        runtime = getattr(entry, "runtime_data", None) if entry else None
+        if entry is None or entry.domain != DOMAIN or runtime is None:
+            raise ServiceValidationError(
+                f"No Discord Assist config entry with id {entry_id}"
+            )
+        store: ButtonStore = runtime.button_store
+        record = store.get(call.data["message_id"])
+        if record is None or record.channel_id != call.data["channel_id"]:
+            raise ServiceValidationError(
+                "No button message with that channel and message id is "
+                "being tracked for this entry"
+            )
+        retired = await async_retire_taken(
+            store,
+            runtime.client,
+            record.message_id,
+            call.data.get("outcome"),
+        )
+        if not retired:
+            raise ServiceValidationError(
+                "The tracked Discord message could not be found to retire it"
+            )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RETIRE_MESSAGE,
+        _retire_message,
+        schema=RETIRE_MESSAGE_SCHEMA,
+    )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> bool:
@@ -82,7 +141,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         await client.close()
         raise ConfigEntryNotReady(f"Could not reach Discord: {err}") from err
 
-    entry.runtime_data = RuntimeData(client=client, router=router)
+    button_store = ButtonStore(hass, entry.entry_id)
+    await button_store.async_load()
+    entry.runtime_data = RuntimeData(
+        client=client, router=router, button_store=button_store
+    )
+
+    async def _prune_expired(_now) -> None:
+        await async_prune_expired(button_store, client)
+
+    entry.async_on_unload(
+        async_track_time_interval(hass, _prune_expired, PRUNE_INTERVAL)
+    )
+    _async_register_retire_service(hass)
 
     async def _run() -> None:
         try:

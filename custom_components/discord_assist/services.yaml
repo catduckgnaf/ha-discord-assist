@@ -1,0 +1,35 @@
+retire_message:
+  name: Retire message
+  description: >-
+    Remove the buttons from a tracked Discord button message, strike through
+    its headline, and optionally append an outcome line. Use this from an
+    automation when the alert the message offered is no longer valid.
+  fields:
+    config_entry_id:
+      name: Config entry
+      description: The Discord Assist config entry that sent the message.
+      required: true
+      example: "0123456789abcdef0123456789abcdef"
+      selector:
+        text:
+    channel_id:
+      name: Channel ID
+      description: The Discord channel the button message is in.
+      required: true
+      example: "123456789012345678"
+      selector:
+        text:
+    message_id:
+      name: Message ID
+      description: The Discord message to retire.
+      required: true
+      example: "1234567890123456789"
+      selector:
+        text:
+    outcome:
+      name: Outcome
+      description: Optional line appended to the message, for example "Unlocked by Andrew".
+      required: false
+      example: "Unlocked by Andrew"
+      selector:
+        text:
