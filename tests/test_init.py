@@ -70,6 +70,19 @@ async def test_setup_and_unload(hass: HomeAssistant):
         fake_client.close.assert_awaited()
 
 
+async def test_setup_wires_notes_store(hass: HomeAssistant):
+    entry = _entry()
+    entry.add_to_hass(hass)
+    with patch(CLIENT, return_value=_fake_client()):
+        assert await hass.config_entries.async_setup(entry.entry_id) is True
+        await hass.async_block_till_done()
+    store = entry.runtime_data.notes_store
+    assert store is not None
+    assert entry.runtime_data.router.notes_store is store
+    await store.async_add_note(7, "do not ask first")
+    assert await store.async_notes_for(7) == ["do not ask first"]
+
+
 async def test_login_failure_triggers_reauth(hass: HomeAssistant):
     entry = _entry()
     entry.add_to_hass(hass)

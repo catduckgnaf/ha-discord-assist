@@ -14,6 +14,7 @@ from .conversation_router import (
     MessageContext,
     make_conversation_key,
 )
+from .notes import MAX_NOTES_PER_USER, NoteLimitError, parse_notes_command
 from .text_utils import chunk_message, strip_self_mention
 
 _LOGGER = logging.getLogger(__name__)
@@ -79,6 +80,19 @@ class DiscordAssistClient(discord.Client):
         if not text:
             return
 
+        # Notes text commands are handled here and never reach the agent.
+        # Reaching this point means should_respond already authorized the
+        # author; _notes_reply double-checks before mutating anything.
+        command = parse_notes_command(text)
+        if command is not None:
+            reply = ERROR_REPLY
+            try:
+                reply = await self._notes_reply(message.author.id, command)
+            except Exception:  # noqa: BLE001 - never let the gateway die
+                _LOGGER.exception("Notes command failed")
+            await self._send_reply(message, reply or EMPTY_REPLY)
+            return
+
         key = make_conversation_key(
             is_dm=is_dm, channel_id=message.channel.id, author_id=message.author.id
         )
@@ -96,6 +110,50 @@ class DiscordAssistClient(discord.Client):
         except Exception:  # noqa: BLE001 - never let the gateway die
             _LOGGER.exception("Conversation processing failed")
         await self._send_reply(message, reply or EMPTY_REPLY)
+
+    async def _notes_reply(self, author_id: int, command: tuple[str, str]) -> str:
+        """Answer a notes text command for one authorized Discord user."""
+        # Fail closed, in depth: should_respond already gated the message,
+        # but a note must never be stored for someone with no HA identity.
+        if self.router.ha_user_for(author_id) is None:
+            return "You are not authorized to use standing preferences."
+        store = getattr(self.router, "notes_store", None)
+        if store is None:
+            return "Standing preferences are not available right now."
+        action, argument = command
+        if action == "add":
+            try:
+                added = await store.async_add_note(author_id, argument)
+            except NoteLimitError:
+                return (
+                    f"You already have {MAX_NOTES_PER_USER} standing "
+                    "preferences. Say 'notes' to see them, then "
+                    "'forget note <number>' to remove one first."
+                )
+            except ValueError:
+                return "That note was empty after cleaning, so I did not save it."
+            return f"Remembered: {added}"
+        if action == "list":
+            notes = await store.async_notes_for(author_id)
+            if not notes:
+                return (
+                    "You have no standing preferences saved. "
+                    "Say 'remember: <note>' to add one."
+                )
+            lines = ["Your standing preferences:"]
+            lines.extend(
+                f"{index}. {note}" for index, note in enumerate(notes, start=1)
+            )
+            return "\n".join(lines)
+        # action == "forget"
+        try:
+            index = int(argument)
+        except ValueError:
+            return "Usage: forget note <number> (say 'notes' to see the numbers)."
+        removed = await store.async_remove_note(author_id, index)
+        if removed is None:
+            return f"You do not have a note {index}. Say 'notes' to see them."
+        return f"Forgot note {index}: {removed}"
 
     async def _send_reply(self, message: discord.Message, reply: str) -> None:
         """First piece replies to the message (no ping); the rest follow it.

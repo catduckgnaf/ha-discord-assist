@@ -39,6 +39,7 @@ from .const import (
     LOCAL_AGENT_ID,
 )
 from .conversation_cache import ConversationCache, TurnLocks
+from .notes import NotesStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -138,6 +139,7 @@ class ConversationRouter:
     prefer_local: bool = DEFAULT_PREFER_LOCAL
     agent_timeout: float = DEFAULT_AGENT_TIMEOUT
     turns: TurnLocks = field(default_factory=TurnLocks)
+    notes_store: NotesStore | None = None
 
     @property
     def has_authorized_users(self) -> bool:
@@ -207,7 +209,12 @@ class ConversationRouter:
             try:
                 async with asyncio.timeout(self.agent_timeout):
                     return await self._converse(
-                        text, conversation_key, context, device_id, where
+                        text,
+                        conversation_key,
+                        context,
+                        device_id,
+                        where,
+                        discord_user_id=discord_user_id,
                     )
             except TimeoutError as err:
                 raise AgentTimeout from err
@@ -219,6 +226,8 @@ class ConversationRouter:
         context: Context,
         device_id: str | None,
         where: MessageContext,
+        *,
+        discord_user_id: int | None = None,
     ) -> str:
         if self.prefer_local and self.agent_id != LOCAL_AGENT_ID:
             # No conversation_id: the local agent is stateless here, and the
@@ -235,11 +244,17 @@ class ConversationRouter:
             if not _local_needs_fallback(local):
                 return _speech(local)
 
-        extra = (
-            await self._speaker_prompt(context.user_id, device_id, where)
-            if self.speaker_context
-            else None
-        )
+        # Standing preferences are deliberately NOT coupled to the
+        # speaker_context switch: that switch controls the speaker/channel/
+        # time facts, while notes are the speaker's own saved preferences.
+        # Notes still inject when speaker context is off, after it when on.
+        parts: list[str] = []
+        if self.speaker_context:
+            parts.append(await self._speaker_prompt(context.user_id, device_id, where))
+        notes_prompt = await self._notes_prompt(discord_user_id, where)
+        if notes_prompt:
+            parts.append(notes_prompt)
+        extra = "\n".join(parts) if parts else None
         result = await async_converse(
             self.hass,
             text,
@@ -278,6 +293,25 @@ class ConversationRouter:
         lines.append(f"Local time: {dt_util.now().strftime('%A %Y-%m-%d %H:%M')}.")
         return "\n".join(lines)
 
+    async def _notes_prompt(
+        self, discord_user_id: int | None, where: MessageContext
+    ) -> str | None:
+        """Only the speaker's own standing preferences, as a bullet list.
+
+        Notes are keyed by Discord user id, never by Home Assistant user, so
+        two Discord users who act as the same HA user never see each other's
+        notes. They are user-supplied prompt text, not permissions.
+        """
+        if self.notes_store is None or discord_user_id is None:
+            return None
+        notes = await self.notes_store.async_notes_for(discord_user_id)
+        if not notes:
+            return None
+        speaker = _clean_name(where.display_name) or "the speaker"
+        lines = [f"Standing preferences from {speaker}:"]
+        lines.extend(f"- {note}" for note in notes)
+        return "\n".join(lines)
+
     def _area_name(self, device_id: str | None) -> str | None:
         if not device_id:
             return None
@@ -288,7 +322,12 @@ class ConversationRouter:
         return area.name if area else None
 
     @classmethod
-    def from_entry(cls, hass: HomeAssistant, entry: ConfigEntry) -> ConversationRouter:
+    def from_entry(
+        cls,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        notes_store: NotesStore | None = None,
+    ) -> ConversationRouter:
         opts = entry.options
         return cls(
             hass=hass,
@@ -307,4 +346,5 @@ class ConversationRouter:
             speaker_context=opts.get(CONF_SPEAKER_CONTEXT, DEFAULT_SPEAKER_CONTEXT),
             prefer_local=opts.get(CONF_PREFER_LOCAL, DEFAULT_PREFER_LOCAL),
             agent_timeout=float(opts.get(CONF_AGENT_TIMEOUT, DEFAULT_AGENT_TIMEOUT)),
+            notes_store=notes_store,
         )

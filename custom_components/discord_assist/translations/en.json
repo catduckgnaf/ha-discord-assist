@@ -65,7 +65,8 @@
           "add_user_map": "Add a Discord-to-Home-Assistant user mapping",
           "remove_user_map": "Remove a user mapping",
           "add_room": "Treat a channel as a room",
-          "remove_room": "Remove a room channel"
+          "remove_room": "Remove a room channel",
+          "remove_note": "View and remove standing preferences (notes)"
         }
       },
       "settings": {
@@ -110,10 +111,18 @@
         "data": {
           "channel_id": "Discord channel ID"
         }
+      },
+      "remove_note": {
+        "title": "Standing preferences (notes)",
+        "description": "Every saved note is listed with its Discord user ID and number. Picking one removes it. Notes are added from Discord with 'remember: <note>'.",
+        "data": {
+          "note_key": "Note to remove"
+        }
       }
     },
     "abort": {
-      "no_rooms": "No channels are mapped to rooms."
+      "no_rooms": "No channels are mapped to rooms.",
+      "no_notes": "No standing preferences are saved yet."
     }
   },
   "entity": {

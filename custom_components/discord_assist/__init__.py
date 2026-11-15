@@ -25,6 +25,7 @@ from .const import (
     signal_connection,
 )
 from .conversation_router import ConversationRouter
+from .notes import NotesStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class RuntimeData:
 
     client: DiscordAssistClient
     router: ConversationRouter
+    notes_store: NotesStore | None = None
 
 
 type DiscordConfigEntry = ConfigEntry[RuntimeData]
@@ -60,7 +62,9 @@ def _set_issue(hass: HomeAssistant, entry: ConfigEntry, kind: str, active: bool)
 
 async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> bool:
     """Set up Discord Assist from a config entry."""
-    router = ConversationRouter.from_entry(hass, entry)
+    notes_store = NotesStore(hass, entry.entry_id)
+    await notes_store.async_load()
+    router = ConversationRouter.from_entry(hass, entry, notes_store=notes_store)
     if not router.has_authorized_users:
         _LOGGER.warning(
             "No Discord users are authorized for %s; the bot will ignore everyone "
@@ -82,7 +86,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         await client.close()
         raise ConfigEntryNotReady(f"Could not reach Discord: {err}") from err
 
-    entry.runtime_data = RuntimeData(client=client, router=router)
+    entry.runtime_data = RuntimeData(
+        client=client, router=router, notes_store=notes_store
+    )
 
     async def _run() -> None:
         try:
