@@ -13,18 +13,24 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import pytest
 
-from custom_components.discord_assist.bot import DiscordAssistClient
+from custom_components.discord_assist.bot import (
+    TIMEOUT_REPLY,
+    UNAUTHORIZED_REPLY,
+    DiscordAssistClient,
+)
 from custom_components.discord_assist.conversation_cache import ConversationCache
 from custom_components.discord_assist.conversation_router import (
     AgentTimeout,
     ConversationRouter,
 )
-from custom_components.discord_assist.slash_commands import (
-    REFUSAL,
-    TIMEOUT_REPLY,
-    NotesStore,
-    exposed_entity_choices,
+from custom_components.discord_assist.notes import (
+    MAX_NOTES_PER_USER,
+    NoteLimitError,
+    clean_note,
 )
+from custom_components.discord_assist.slash_commands import exposed_entity_choices
+
+KEY_SUFFIX = ":agent:conversation.ollama"
 
 _CONVERSE = "custom_components.discord_assist.conversation_router.async_converse"
 
@@ -35,6 +41,7 @@ class FakeResponse:
     def __init__(self, events):
         self.events = events
         self.defer_calls = []
+        self.sent_messages = []
         self._done = False
 
     def is_done(self):
@@ -47,6 +54,7 @@ class FakeResponse:
 
     async def send_message(self, content=None, **kwargs):
         self.events.append("send_message")
+        self.sent_messages.append((content, kwargs))
         self._done = True
 
 
@@ -59,16 +67,22 @@ class FakeFollowup:
 
 
 class FakeInteraction:
-    def __init__(self, *, user_id=7, channel_id=111, is_dm=False, events=None):
+    def __init__(
+        self, *, user_id=7, channel_id=111, is_dm=False, events=None, name="assist"
+    ):
         self.events = events if events is not None else []
+        self.type = discord.InteractionType.application_command
+        self.data = {"name": name}
         self.user = SimpleNamespace(id=user_id, display_name="Catduck")
         if is_dm:
             channel = MagicMock(spec=discord.DMChannel)
             self.guild = None
+            self.guild_id = None
         else:
             channel = MagicMock(spec=discord.TextChannel)
             channel.name = "general"
             self.guild = SimpleNamespace(id=555)
+            self.guild_id = 555
         channel.id = channel_id
         self.channel = channel
         self.channel_id = channel_id
@@ -94,6 +108,32 @@ def _client(router, hass=None):
     return client
 
 
+class FakeNotes:
+    """In-memory stand-in with the persistent NotesStore's interface."""
+
+    def __init__(self):
+        self.notes = {}
+
+    async def async_add_note(self, user_id, raw):
+        cleaned = clean_note(raw)
+        if not cleaned:
+            raise ValueError("empty")
+        mine = self.notes.setdefault(user_id, [])
+        if len(mine) >= MAX_NOTES_PER_USER:
+            raise NoteLimitError
+        mine.append(cleaned)
+        return cleaned
+
+    async def async_notes_for(self, user_id):
+        return list(self.notes.get(user_id, []))
+
+    async def async_remove_note(self, user_id, index):
+        mine = self.notes.get(user_id, [])
+        if not 1 <= index <= len(mine):
+            return None
+        return mine.pop(index - 1)
+
+
 def _router(hass=None, **overrides):
     defaults = dict(
         hass=hass if hass is not None else object(),
@@ -107,6 +147,7 @@ def _router(hass=None, **overrides):
         fallback_user=None,
         cache=ConversationCache(timedelta(minutes=15)),
         speaker_context=False,
+        notes_store=FakeNotes(),
     )
     defaults.update(overrides)
     return ConversationRouter(**defaults)
@@ -157,12 +198,23 @@ async def test_assist_defers_before_agent_and_shares_channel_conversation():
     # The reply filled in the deferred (original) response.
     assert interaction.edits[0]["content"] == "Hi there"
     # Same conversation key a plain message in channel 111 would use.
-    assert router.cache.get("channel:111") == "conv-1"
+    assert router.cache.get("channel:111" + KEY_SUFFIX) == "conv-1"
+
+
+async def test_on_interaction_leaves_tree_commands_to_the_tree():
+    """discord.py fires on_interaction for tree commands too: no double run."""
+    router = _router()
+    router.process = AsyncMock(return_value="once")
+    client = _client(router)
+    interaction = FakeInteraction(name="assist")
+    interaction.data["options"] = [{"name": "text", "value": "hi"}]
+    await client.on_interaction(interaction)
+    router.process.assert_not_awaited()
+    assert interaction.response.defer_calls == []
 
 
 async def test_assist_timeout_edits_reply_with_timeout_text():
-    router = MagicMock()
-    router.ha_user_for.return_value = "ha-a"
+    router = _router()
     router.process = AsyncMock(side_effect=AgentTimeout())
     client = _client(router)
     interaction = FakeInteraction()
@@ -185,19 +237,35 @@ async def test_assist_timeout_edits_reply_with_timeout_text():
 async def test_unauthorized_user_gets_ephemeral_refusal_and_nothing_runs(
     command, kwargs
 ):
-    router = MagicMock()
-    router.ha_user_for.return_value = None
+    router = _router()
     router.process = AsyncMock()
+    router.reset_conversation = AsyncMock()
     client = _client(router)
     interaction = FakeInteraction(user_id=99)
     await _callback(client, command)(interaction, **kwargs)
-    # Defer still happened first, then exactly one ephemeral refusal.
-    assert interaction.response.defer_calls, "handler must defer first"
-    assert interaction.followup.sent == [(REFUSAL, {"ephemeral": True})]
+    # The refusal is the initial response, so it really is ephemeral:
+    # after a public defer Discord ignores the flag on the first followup.
+    assert interaction.response.defer_calls == []
+    assert interaction.response.sent_messages == [
+        (UNAUTHORIZED_REPLY, {"ephemeral": True})
+    ]
     assert interaction.edits == []
     router.process.assert_not_awaited()
-    # /reset must not have touched the cache for an unauthorized user.
-    router.cache.clear.assert_not_called()
+    router.reset_conversation.assert_not_awaited()
+    assert await router.notes_store.async_notes_for(99) == []
+
+
+async def test_commands_follow_the_dm_option():
+    """respond_dms off: a mapped user's DM command is refused like a message."""
+    router = _router(respond_dms=False)
+    router.process = AsyncMock()
+    client = _client(router)
+    interaction = FakeInteraction(is_dm=True, channel_id=999)
+    await _callback(client, "assist")(interaction, text="hi")
+    router.process.assert_not_awaited()
+    assert interaction.response.sent_messages == [
+        (UNAUTHORIZED_REPLY, {"ephemeral": True})
+    ]
 
 
 def _fake_hass_with_entities(entity_ids):
@@ -206,9 +274,19 @@ def _fake_hass_with_entities(entity_ids):
     )
 
 
-def test_autocomplete_caps_at_25_and_offers_exposed_only():
+def _reader(readable=lambda entity_id: True):
+    return SimpleNamespace(
+        id="ha-a",
+        name="Andrew",
+        permissions=SimpleNamespace(
+            check_entity=lambda entity_id, key: readable(entity_id)
+        ),
+    )
+
+
+def test_autocomplete_caps_at_25_and_offers_exposed_readable_only():
     entity_ids = [f"light.lamp_{index}" for index in range(40)]
-    entity_ids += ["sensor.secret", "switch.hidden"]
+    entity_ids += ["sensor.secret", "switch.hidden", "light.zz_private"]
     hass = _fake_hass_with_entities(entity_ids)
     seen_assistants = []
 
@@ -216,14 +294,17 @@ def test_autocomplete_caps_at_25_and_offers_exposed_only():
         seen_assistants.append(assistant)
         return entity_id.startswith("light.")
 
+    user = _reader(lambda entity_id: entity_id != "light.zz_private")
     with patch(
         "custom_components.discord_assist.slash_commands.async_should_expose",
         side_effect=fake_expose,
     ):
-        choices = exposed_entity_choices(hass, "")
+        choices = exposed_entity_choices(hass, user, "")
+        private = exposed_entity_choices(hass, user, "light.zz")
     assert len(choices) == 25
     assert all(choice.value.startswith("light.") for choice in choices)
     assert set(seen_assistants) == {"conversation"}
+    assert private == []
 
 
 def test_autocomplete_filters_by_typed_prefix():
@@ -234,8 +315,8 @@ def test_autocomplete_filters_by_typed_prefix():
         "custom_components.discord_assist.slash_commands.async_should_expose",
         return_value=True,
     ):
-        by_domain = exposed_entity_choices(hass, "light.k")
-        by_object = exposed_entity_choices(hass, "kitchen")
+        by_domain = exposed_entity_choices(hass, _reader(), "light.k")
+        by_object = exposed_entity_choices(hass, _reader(), "kitchen")
     assert [c.value for c in by_domain] == ["light.kids_room", "light.kitchen"]
     assert [c.value for c in by_object] == [
         "light.kitchen",
@@ -243,8 +324,14 @@ def test_autocomplete_filters_by_typed_prefix():
     ]
 
 
+def _autocomplete_hass(entity_ids):
+    hass = _fake_hass_with_entities(entity_ids)
+    hass.auth = SimpleNamespace(async_get_user=AsyncMock(return_value=_reader()))
+    return hass
+
+
 async def test_registered_autocomplete_uses_exposed_entities():
-    hass = _fake_hass_with_entities(["light.kitchen", "light.den"])
+    hass = _autocomplete_hass(["light.kitchen", "light.den"])
     client = _client(_router(), hass=hass)
     autocomplete = client.tree.get_command("state")._params["entity"].autocomplete
     with patch(
@@ -253,6 +340,18 @@ async def test_registered_autocomplete_uses_exposed_entities():
     ):
         choices = await autocomplete(FakeInteraction(), "light.k")
     assert [choice.value for choice in choices] == ["light.kitchen"]
+
+
+async def test_autocomplete_offers_nothing_to_unauthorized_users():
+    hass = _autocomplete_hass(["light.kitchen", "light.den"])
+    client = _client(_router(), hass=hass)
+    autocomplete = client.tree.get_command("state")._params["entity"].autocomplete
+    with patch(
+        "custom_components.discord_assist.slash_commands.async_should_expose",
+        return_value=True,
+    ):
+        choices = await autocomplete(FakeInteraction(user_id=99), "light")
+    assert choices == []
 
 
 def _state_hass(*, can_read, state_value="on"):
@@ -276,11 +375,15 @@ def _state_hass(*, can_read, state_value="on"):
     return hass
 
 
+_EXPOSE = "custom_components.discord_assist.slash_commands.async_should_expose"
+
+
 async def test_state_reads_state_as_mapped_user():
     hass = _state_hass(can_read=True)
     client = _client(_router(), hass=hass)
     interaction = FakeInteraction()
-    await _callback(client, "state")(interaction, entity="light.kitchen")
+    with patch(_EXPOSE, return_value=True):
+        await _callback(client, "state")(interaction, entity="light.kitchen")
     assert interaction.response.defer_calls == [{"thinking": True, "ephemeral": True}]
     assert "Kitchen light (light.kitchen) is on." in interaction.edits[0]["content"]
     hass.states.get.assert_called_once_with("light.kitchen")
@@ -290,32 +393,41 @@ async def test_state_policy_refusal_reads_nothing():
     hass = _state_hass(can_read=False)
     client = _client(_router(), hass=hass)
     interaction = FakeInteraction()
-    await _callback(client, "state")(interaction, entity="light.kitchen")
-    assert len(interaction.followup.sent) == 1
-    content, kwargs = interaction.followup.sent[0]
-    assert "do not have permission" in content
-    assert kwargs == {"ephemeral": True}
-    assert interaction.edits == []
+    with patch(_EXPOSE, return_value=True):
+        await _callback(client, "state")(interaction, entity="light.kitchen")
+    assert interaction.response.defer_calls == [{"thinking": True, "ephemeral": True}]
+    assert "do not have permission" in interaction.edits[0]["content"]
+    hass.states.get.assert_not_called()
+
+
+async def test_state_refuses_entities_not_exposed_to_assist():
+    """An admin may read anything, but /state only reads what Assist sees."""
+    hass = _state_hass(can_read=True)
+    client = _client(_router(), hass=hass)
+    interaction = FakeInteraction()
+    with patch(_EXPOSE, return_value=False):
+        await _callback(client, "state")(interaction, entity="lock.front_door")
+    assert "do not have permission" in interaction.edits[0]["content"]
     hass.states.get.assert_not_called()
 
 
 async def test_reset_clears_cached_conversation_for_channel():
     router = _router()
-    router.cache.set("channel:111", "conv-1")
+    router.cache.set("channel:111" + KEY_SUFFIX, "conv-1")
     client = _client(router)
     interaction = FakeInteraction()
     await _callback(client, "reset")(interaction)
-    assert router.cache.get("channel:111") is None
+    assert router.cache.get("channel:111" + KEY_SUFFIX) is None
     assert "reset" in interaction.edits[0]["content"].lower()
 
 
 async def test_reset_clears_cached_conversation_for_dm():
     router = _router()
-    router.cache.set("dm:7", "conv-dm")
+    router.cache.set("dm:7" + KEY_SUFFIX, "conv-dm")
     client = _client(router)
     interaction = FakeInteraction(is_dm=True, channel_id=999)
     await _callback(client, "reset")(interaction)
-    assert router.cache.get("dm:7") is None
+    assert router.cache.get("dm:7" + KEY_SUFFIX) is None
 
 
 async def test_whoami_reports_mapped_ha_user():
@@ -333,51 +445,37 @@ async def test_whoami_reports_mapped_ha_user():
 
 
 async def test_remember_notes_forget_flow():
+    """Slash notes are the persistent #16 notes, shared with the text form."""
     client = _client(_router())
     interaction = FakeInteraction()
     await _callback(client, "remember")(interaction, note="all lights means all")
     assert "Remembered: all lights means all" in interaction.edits[0]["content"]
+    assert interaction.response.defer_calls == [{"thinking": True, "ephemeral": True}]
 
     listing = FakeInteraction()
     await _callback(client, "notes")(listing)
     assert "1. all lights means all" in listing.edits[0]["content"]
 
+    client.router.user_map[8] = "ha-b"
     other = FakeInteraction(user_id=8)
-    other_client_router = client.router
-    # User 8 is not mapped on this router, so use a mapped second user.
-    other_client_router.user_map[8] = "ha-b"
     await _callback(client, "notes")(other)
-    assert "no saved notes" in other.edits[0]["content"]
+    assert "no standing preferences" in other.edits[0]["content"]
 
     forgotten = FakeInteraction()
     await _callback(client, "forget")(forgotten, number=1)
-    assert "Forgot: all lights means all" in forgotten.edits[0]["content"]
-    assert client.notes.list(7) == []
+    assert "Forgot note 1: all lights means all" in forgotten.edits[0]["content"]
+    assert await client.router.notes_store.async_notes_for(7) == []
 
 
-async def test_remember_enforces_cap_with_ephemeral_message():
+async def test_remember_enforces_cap():
     client = _client(_router())
-    for index in range(10):
+    for index in range(MAX_NOTES_PER_USER):
         await _callback(client, "remember")(FakeInteraction(), note=f"note {index}")
     interaction = FakeInteraction()
     await _callback(client, "remember")(interaction, note="one too many")
-    assert interaction.edits == []
-    content, kwargs = interaction.followup.sent[0]
-    assert "10 notes" in content
-    assert kwargs == {"ephemeral": True}
-    assert len(client.notes.list(7)) == 10
-
-
-def test_notes_store_cleans_and_caps_notes():
-    store = NotesStore()
-    saved = store.add(7, "  be\nbrief\x00 please  ")
-    assert saved == "be brief please"
-    long_note = store.add(7, "x" * 500)
-    assert len(long_note) == 200
-    with pytest.raises(ValueError):
-        store.add(7, "\x00\x01")
-    with pytest.raises(ValueError):
-        store.forget(7, 99)
+    assert "already have" in interaction.edits[0]["content"]
+    notes = await client.router.notes_store.async_notes_for(7)
+    assert len(notes) == MAX_NOTES_PER_USER
 
 
 async def test_on_ready_syncs_commands_to_each_guild(monkeypatch):
@@ -418,3 +516,20 @@ async def test_sync_failure_in_one_guild_does_not_stop_others(monkeypatch):
     client.tree.sync = fake_sync
     await client._sync_slash_commands()
     assert synced == [guild_b]
+
+
+async def test_commands_sync_only_once_per_client(monkeypatch):
+    """on_ready fires again after full reconnects; sync only the first time."""
+    client = _client(_router())
+    guild = SimpleNamespace(id=1001)
+    monkeypatch.setattr(type(client), "guilds", property(lambda self: [guild]))
+    synced = []
+
+    async def fake_sync(*, guild=None):
+        synced.append(guild)
+
+    client.tree.copy_global_to = lambda *, guild: None
+    client.tree.sync = fake_sync
+    await client._sync_slash_commands()
+    await client._sync_slash_commands()
+    assert synced == [guild]

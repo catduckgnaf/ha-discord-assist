@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from homeassistant.util import dt as dt_util
@@ -23,14 +25,22 @@ class ConversationCache:
         self._now = now
         self._store: dict[str, tuple[str, datetime]] = {}
 
-    def get(self, key: str) -> str | None:
+    def __len__(self) -> int:
+        return len(self._store)
+
+    def get(self, key: str, ttl: timedelta | None = None) -> str | None:
+        """Cached conversation id for ``key``, or None once it idled out.
+
+        ``ttl`` overrides the default idle time for this lookup (the
+        per-channel idle setting).
+        """
         # Eviction is lazy (only on access) by design: inactive keys persist until
         # next access, which is acceptable at home scale.
         item = self._store.get(key)
         if item is None:
             return None
         conversation_id, last_used = item
-        if self._now() - last_used > self._ttl:
+        if self._now() - last_used > (self._ttl if ttl is None else ttl):
             del self._store[key]
             return None
         return conversation_id
@@ -41,9 +51,91 @@ class ConversationCache:
             return
         self._store[key] = (conversation_id, self._now())
 
-    def clear(self, key: str) -> None:
-        """Drop any cached conversation id for ``key`` (used by /reset)."""
+    def reset(self, key: str) -> None:
+        """Drop the cached conversation id for ``key`` (the `reset` command)."""
         self._store.pop(key, None)
+
+
+@dataclass(frozen=True)
+class RateLimitDecision:
+    """Outcome of one rate-limit check.
+
+    ``should_notify`` is True only for the first refusal in a throttle
+    window, so the caller can send one notice and then stay silent until
+    the bucket refills enough to allow a request again.
+    """
+
+    allowed: bool
+    should_notify: bool = False
+
+
+@dataclass
+class _Bucket:
+    tokens: float
+    updated: float
+    notified: bool = False
+
+
+class RateLimiter:
+    """Token bucket per key, kept in a bounded LRU like ``TurnLocks``.
+
+    Each key starts with ``burst`` tokens and refills at
+    ``per_minute`` tokens per minute. A ``per_minute`` of 0 (or less)
+    disables limiting entirely. Buckets are in memory only and the map
+    never grows past ``max_keys`` entries.
+    """
+
+    def __init__(
+        self,
+        per_minute: float,
+        burst: int = 3,
+        max_keys: int = 256,
+        now: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._per_minute = float(per_minute or 0)
+        self._capacity = max(1, int(burst)) if self.enabled else 0
+        self._max = max_keys
+        self._now = now
+        self._buckets: OrderedDict[str, _Bucket] = OrderedDict()
+
+    @property
+    def enabled(self) -> bool:
+        return self._per_minute > 0
+
+    def __len__(self) -> int:
+        return len(self._buckets)
+
+    def check(self, key: str) -> RateLimitDecision:
+        """Consume one token for ``key``, or report a refusal."""
+        if not self.enabled:
+            return RateLimitDecision(allowed=True)
+        now = self._now()
+        bucket = self._buckets.get(key)
+        if bucket is None:
+            bucket = self._buckets[key] = _Bucket(
+                tokens=float(self._capacity), updated=now
+            )
+        else:
+            self._buckets.move_to_end(key)
+            elapsed = max(0.0, now - bucket.updated)
+            refill = elapsed * self._per_minute / 60.0
+            bucket.tokens = min(float(self._capacity), bucket.tokens + refill)
+            bucket.updated = now
+        if bucket.tokens >= 1.0:
+            bucket.tokens -= 1.0
+            bucket.notified = False
+            decision = RateLimitDecision(allowed=True)
+        else:
+            decision = RateLimitDecision(
+                allowed=False, should_notify=not bucket.notified
+            )
+            bucket.notified = True
+        self._prune()
+        return decision
+
+    def _prune(self) -> None:
+        while len(self._buckets) > self._max:
+            self._buckets.popitem(last=False)
 
 
 class TurnLocks:
