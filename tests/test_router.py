@@ -11,11 +11,17 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.discord_assist.const import (
     CONF_AGENT_ID,
+    CONF_AGENT_MAP_CHANNEL,
+    CONF_AGENT_MAP_USER,
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
+    CONF_CHANNEL_IDLE_MINUTES,
+    CONF_CONVERSATION_SCOPE,
+    CONF_EVENT_EXCLUDE_TEXT,
     CONF_PREFER_LOCAL,
     CONF_ROOM_MAP,
     CONF_USER_MAP,
+    CONVERSATION_SCOPE_USER,
     LOCAL_AGENT_ID,
 )
 from custom_components.discord_assist.conversation_cache import ConversationCache
@@ -23,6 +29,7 @@ from custom_components.discord_assist.conversation_router import (
     AgentTimeout,
     ConversationRouter,
     MessageContext,
+    is_reset_command,
     make_conversation_key,
     resolve_ha_user_id,
 )
@@ -51,6 +58,249 @@ def _router(**overrides):
 def test_make_conversation_key_dm_vs_channel():
     assert make_conversation_key(is_dm=True, channel_id=5, author_id=9) == "dm:9"
     assert make_conversation_key(is_dm=False, channel_id=5, author_id=9) == "channel:5"
+
+
+def test_make_conversation_key_user_scope():
+    # Each author gets their own key in a shared channel.
+    assert (
+        make_conversation_key(
+            is_dm=False, channel_id=5, author_id=9, scope=CONVERSATION_SCOPE_USER
+        )
+        == "channel:5:user:9"
+    )
+    assert (
+        make_conversation_key(
+            is_dm=False, channel_id=5, author_id=10, scope=CONVERSATION_SCOPE_USER
+        )
+        == "channel:5:user:10"
+    )
+    # DMs are keyed per user under both scopes.
+    assert (
+        make_conversation_key(
+            is_dm=True, channel_id=5, author_id=9, scope=CONVERSATION_SCOPE_USER
+        )
+        == "dm:9"
+    )
+    # The channel scope ignores the author, as before.
+    assert (
+        make_conversation_key(is_dm=False, channel_id=5, author_id=9, scope="channel")
+        == "channel:5"
+    )
+
+
+def test_router_conversation_key_uses_scope():
+    agent = ":agent:conversation.ollama"
+    default = _router()
+    assert (
+        default.conversation_key(is_dm=False, channel_id=5, author_id=9)
+        == "channel:5" + agent
+    )
+    assert (
+        default.conversation_key(is_dm=True, channel_id=5, author_id=9)
+        == "dm:9" + agent
+    )
+    per_user = _router(conversation_scope=CONVERSATION_SCOPE_USER)
+    assert (
+        per_user.conversation_key(is_dm=False, channel_id=5, author_id=9)
+        == "channel:5:user:9" + agent
+    )
+    assert (
+        per_user.conversation_key(is_dm=True, channel_id=5, author_id=9)
+        == "dm:9" + agent
+    )
+
+
+async def _echo_converse(hass, text, conversation_id, context, **kwargs):
+    """Continue the passed conversation, else start one named for the user."""
+    return SimpleNamespace(
+        response=SimpleNamespace(speech={"plain": {"speech": "ok"}}),
+        conversation_id=conversation_id or f"conv-{context.user_id}",
+    )
+
+
+async def test_process_user_scope_separates_conversation_ids():
+    router = _router(
+        user_map={7: "ha-a", 8: "ha-b"}, conversation_scope=CONVERSATION_SCOPE_USER
+    )
+    key_a = router.conversation_key(is_dm=False, channel_id=111, author_id=7)
+    key_b = router.conversation_key(is_dm=False, channel_id=111, author_id=8)
+    assert key_a != key_b
+    with patch(_CONVERSE, new=AsyncMock(side_effect=_echo_converse)) as converse:
+        await router.process(
+            text="turn on the light", discord_user_id=7, conversation_key=key_a
+        )
+        await router.process(
+            text="turn it off again", discord_user_id=8, conversation_key=key_b
+        )
+        await router.process(
+            text="and dim it", discord_user_id=7, conversation_key=key_a
+        )
+    # Each user's first turn starts fresh; only their own turns continue.
+    seen = [call.args[2] for call in converse.call_args_list]
+    assert seen == [None, None, "conv-ha-a"]
+
+
+async def test_process_channel_scope_shares_conversation_id():
+    router = _router(user_map={7: "ha-a", 8: "ha-b"})
+    key = router.conversation_key(is_dm=False, channel_id=111, author_id=7)
+    assert key == router.conversation_key(is_dm=False, channel_id=111, author_id=8)
+    with patch(_CONVERSE, new=AsyncMock(side_effect=_echo_converse)) as converse:
+        await router.process(
+            text="turn on the light", discord_user_id=7, conversation_key=key
+        )
+        await router.process(
+            text="turn it off again", discord_user_id=8, conversation_key=key
+        )
+    # The second speaker continues the first speaker's conversation.
+    seen = [call.args[2] for call in converse.call_args_list]
+    assert seen == [None, "conv-ha-a"]
+
+
+def test_make_conversation_key_includes_agent():
+    """The agent segment keeps one agent's conversation_id from another's."""
+    dm = make_conversation_key(
+        is_dm=True, channel_id=5, author_id=9, agent_id="conversation.ollama"
+    )
+    channel = make_conversation_key(
+        is_dm=False, channel_id=5, author_id=9, agent_id="conversation.ollama"
+    )
+    other = make_conversation_key(
+        is_dm=False, channel_id=5, author_id=9, agent_id=LOCAL_AGENT_ID
+    )
+    assert dm == "dm:9:agent:conversation.ollama"
+    assert channel == "channel:5:agent:conversation.ollama"
+    assert other == f"channel:5:agent:{LOCAL_AGENT_ID}"
+    assert channel != other
+
+
+def _agent_router(**overrides):
+    defaults = dict(
+        agent_map_user={7: "conversation.user-agent"},
+        agent_map_channel={111: "conversation.channel-agent"},
+    )
+    defaults.update(overrides)
+    return _router(**defaults)
+
+
+def test_agent_for_user_beats_channel_and_default():
+    router = _agent_router()
+    assert router.agent_for(7, 111, None) == "conversation.user-agent"
+    assert router.agent_for(7, 222, None) == "conversation.user-agent"
+
+
+def test_agent_for_channel_beats_default():
+    router = _agent_router()
+    assert router.agent_for(8, 111, None) == "conversation.channel-agent"
+
+
+def test_agent_for_default_when_no_override():
+    router = _agent_router()
+    assert router.agent_for(8, 222, None) == "conversation.ollama"
+    assert router.agent_for(8, None, None) == "conversation.ollama"
+
+
+def test_agent_for_thread_inherits_parent_channel():
+    router = _agent_router()
+    # Thread 999 lives in channel 111: it gets the parent channel's agent.
+    assert router.agent_for(8, 999, 111) == "conversation.channel-agent"
+    # A user override still wins inside a thread.
+    assert router.agent_for(7, 999, 111) == "conversation.user-agent"
+    # A thread in an unmapped channel falls back to the entry default.
+    assert router.agent_for(8, 999, 222) == "conversation.ollama"
+
+
+async def test_process_uses_resolved_agent():
+    router = _agent_router(user_map={7: "ha-a", 8: "ha-b"})
+    with patch(_CONVERSE, new=AsyncMock(return_value=_result())) as conv:
+        await router.process(
+            text="hi",
+            discord_user_id=8,
+            conversation_key="channel:111",
+            where=MessageContext(channel_id=111),
+        )
+        await router.process(
+            text="hi",
+            discord_user_id=7,
+            conversation_key="channel:111",
+            where=MessageContext(channel_id=111),
+        )
+    assert conv.call_args_list[0].kwargs["agent_id"] == "conversation.channel-agent"
+    assert conv.call_args_list[1].kwargs["agent_id"] == "conversation.user-agent"
+
+
+async def test_cache_separates_agents_in_same_channel():
+    """Switching agents never passes one agent's conversation_id to another."""
+    router = _router(
+        user_map={7: "ha-a", 8: "ha-b"},
+        agent_map_user={8: "conversation.other"},
+    )
+
+    def by_agent(*args, **kwargs):
+        return _result(conversation_id=f"conv-for-{kwargs['agent_id']}")
+
+    keys = {}
+    with patch(_CONVERSE, new=AsyncMock(side_effect=by_agent)) as conv:
+        for uid in (7, 8):
+            agent = router.agent_for(uid, 111, None)
+            keys[uid] = make_conversation_key(
+                is_dm=False, channel_id=111, author_id=uid, agent_id=agent
+            )
+            await router.process(
+                text="hi",
+                discord_user_id=uid,
+                conversation_key=keys[uid],
+                where=MessageContext(channel_id=111),
+            )
+        assert keys[7] != keys[8]
+        assert router.cache.get(keys[7]) == "conv-for-conversation.ollama"
+        assert router.cache.get(keys[8]) == "conv-for-conversation.other"
+        # A second turn for user 7 resumes its own agent's conversation,
+        # never the other agent's id (async_converse arg 2 is the id passed).
+        await router.process(
+            text="again",
+            discord_user_id=7,
+            conversation_key=keys[7],
+            where=MessageContext(channel_id=111),
+        )
+    assert conv.call_args_list[-1].args[2] == "conv-for-conversation.ollama"
+
+
+async def test_prefer_local_applies_on_top_of_channel_agent():
+    """Local is tried first; a miss falls back to the resolved agent."""
+    router = _router(
+        user_map={7: "ha-a"},
+        prefer_local=True,
+        agent_map_channel={111: "conversation.channel-agent"},
+    )
+    local = _result(
+        "Sorry",
+        response_type=IntentResponseType.ERROR,
+        error_code=IntentResponseErrorCode.NO_INTENT_MATCH,
+    )
+    resolved = _result("Done by channel agent", conversation_id="chan-1")
+    with patch(_CONVERSE, new=AsyncMock(side_effect=[local, resolved])) as conv:
+        reply = await router.process(
+            text="make it cozy",
+            discord_user_id=7,
+            conversation_key="channel:111",
+            where=MessageContext(channel_id=111),
+        )
+    assert reply == "Done by channel agent"
+    assert conv.call_args_list[0].kwargs["agent_id"] == LOCAL_AGENT_ID
+    assert conv.call_args_list[1].kwargs["agent_id"] == "conversation.channel-agent"
+
+
+async def test_prefer_local_skipped_when_resolved_agent_is_local():
+    """A user override to the local agent is not tried twice."""
+    router = _router(
+        user_map={7: "ha-a"},
+        prefer_local=True,
+        agent_map_user={7: LOCAL_AGENT_ID},
+    )
+    with patch(_CONVERSE, new=AsyncMock(return_value=_result())) as conv:
+        await router.process(text="hi", discord_user_id=7, conversation_key="dm:7")
+    assert conv.await_count == 1
+    assert conv.call_args.kwargs["agent_id"] == LOCAL_AGENT_ID
 
 
 @pytest.mark.parametrize(
@@ -355,6 +605,79 @@ async def test_speaker_context_off_sends_no_prompt():
     assert conv.call_args.kwargs["extra_system_prompt"] is None
 
 
+class _FakeNotesStore:
+    """In-memory stand-in with the NotesStore read interface."""
+
+    def __init__(self, notes):
+        self._notes = notes
+
+    async def async_notes_for(self, discord_user_id):
+        return list(self._notes.get(discord_user_id, []))
+
+
+async def test_only_speakers_notes_are_injected():
+    store = _FakeNotesStore(
+        {7: ["all the lights means all lights", "do not ask first"], 8: ["secret"]}
+    )
+    router = _router(user_map={7: "ha-a", 8: "ha-a"}, notes_store=store)
+    with patch(_CONVERSE, new=AsyncMock(return_value=_result())) as conv:
+        await router.process(
+            text="hi",
+            discord_user_id=7,
+            conversation_key="dm:7",
+            where=MessageContext(display_name="Catduck"),
+        )
+    prompt = conv.call_args.kwargs["extra_system_prompt"]
+    assert prompt == (
+        "Standing preferences from Catduck:\n"
+        "- all the lights means all lights\n"
+        "- do not ask first"
+    )
+    assert "secret" not in prompt
+
+
+async def test_notes_inject_even_when_speaker_context_off():
+    """Decision: notes are not coupled to the speaker_context switch."""
+    store = _FakeNotesStore({7: ["do not ask first"]})
+    router = _router(user_map={7: "ha-a"}, notes_store=store, speaker_context=False)
+    with patch(_CONVERSE, new=AsyncMock(return_value=_result())) as conv:
+        await router.process(
+            text="hi",
+            discord_user_id=7,
+            conversation_key="dm:7",
+            where=MessageContext(display_name="Catduck"),
+        )
+    prompt = conv.call_args.kwargs["extra_system_prompt"]
+    assert prompt == "Standing preferences from Catduck:\n- do not ask first"
+
+
+async def test_notes_come_after_speaker_context(hass):
+    user = await hass.auth.async_create_user("Andrew")
+    store = _FakeNotesStore({7: ["do not ask first"]})
+    router = _router(
+        hass=hass, user_map={7: user.id}, notes_store=store, speaker_context=True
+    )
+    with patch(_CONVERSE, new=AsyncMock(return_value=_result())) as conv:
+        await router.process(
+            text="hi",
+            discord_user_id=7,
+            conversation_key="dm:7",
+            where=MessageContext(display_name="Catduck"),
+        )
+    prompt = conv.call_args.kwargs["extra_system_prompt"]
+    assert prompt.index("Speaker: Catduck") < prompt.index(
+        "Standing preferences from Catduck:\n- do not ask first"
+    )
+
+
+async def test_no_notes_sends_no_notes_section():
+    store = _FakeNotesStore({})
+    router = _router(user_map={7: "ha-a"}, notes_store=store)
+    with patch(_CONVERSE, new=AsyncMock(return_value=_result())) as conv:
+        await router.process(text="hi", discord_user_id=7, conversation_key="dm:7")
+    assert conv.call_args.kwargs["extra_system_prompt"] is None
+
+
 def test_from_entry_reads_new_options():
     entry = SimpleNamespace(
         options={
@@ -369,3 +692,170 @@ def test_from_entry_reads_new_options():
     assert router.prefer_local is True
     assert router.agent_timeout == 30.0
     assert router.speaker_context is True
+
+
+def test_from_entry_conversation_scope():
+    from types import SimpleNamespace
+
+    base = {CONF_AGENT_ID: "conversation.ollama"}
+    default = ConversationRouter.from_entry(
+        object(), SimpleNamespace(options=dict(base))
+    )
+    assert default.conversation_scope == "channel"
+    per_user = ConversationRouter.from_entry(
+        object(),
+        SimpleNamespace(options={**base, CONF_CONVERSATION_SCOPE: "user"}),
+    )
+    assert per_user.conversation_scope == CONVERSATION_SCOPE_USER
+    # An unknown stored value falls back to the shared-channel default.
+    bogus = ConversationRouter.from_entry(
+        object(),
+        SimpleNamespace(options={**base, CONF_CONVERSATION_SCOPE: "bogus"}),
+    )
+    assert bogus.conversation_scope == "channel"
+
+
+def test_from_entry_reads_agent_maps():
+    """Agent maps coerce string keys to ints and drop non-numeric keys."""
+    entry = SimpleNamespace(
+        options={
+            CONF_AGENT_ID: "conversation.ollama",
+            CONF_AGENT_MAP_USER: {"7": "conversation.user-agent", "bad": "x"},
+            CONF_AGENT_MAP_CHANNEL: {"111": "conversation.channel-agent", "no": "y"},
+        }
+    )
+    router = ConversationRouter.from_entry(object(), entry)
+    assert router.agent_map_user == {7: "conversation.user-agent"}
+    assert router.agent_map_channel == {111: "conversation.channel-agent"}
+    assert router.agent_for(7, 111, None) == "conversation.user-agent"
+    assert router.agent_for(8, 111, None) == "conversation.channel-agent"
+    assert router.agent_for(8, 222, None) == "conversation.ollama"
+
+
+def test_from_entry_agent_maps_default_empty():
+    entry = SimpleNamespace(options={CONF_AGENT_ID: "conversation.ollama"})
+    router = ConversationRouter.from_entry(object(), entry)
+    assert router.agent_map_user == {}
+    assert router.agent_map_channel == {}
+
+
+def test_from_entry_reads_event_options_and_entry_id():
+    entry = SimpleNamespace(
+        entry_id="entry-abc",
+        options={
+            CONF_AGENT_ID: "conversation.ollama",
+            CONF_EVENT_EXCLUDE_TEXT: True,
+        },
+    )
+    router = ConversationRouter.from_entry(object(), entry)
+    assert router.config_entry_id == "entry-abc"
+    assert router.event_exclude_text is True
+
+
+def test_from_entry_event_defaults():
+    entry = SimpleNamespace(options={CONF_AGENT_ID: "conversation.ollama"})
+    router = ConversationRouter.from_entry(object(), entry)
+    assert router.config_entry_id is None
+    assert router.event_exclude_text is False
+
+
+def test_conversation_key_carries_resolved_agent():
+    entry = SimpleNamespace(
+        options={
+            CONF_AGENT_ID: "conversation.ollama",
+            CONF_AGENT_MAP_CHANNEL: {"111": "conversation.channel-agent"},
+        }
+    )
+    router = ConversationRouter.from_entry(object(), entry)
+    assert (
+        router.conversation_key(is_dm=False, channel_id=222, author_id=7, parent_id=111)
+        == "channel:222:agent:conversation.channel-agent"
+    )
+    assert (
+        router.conversation_key(is_dm=True, channel_id=5, author_id=7)
+        == "dm:7:agent:conversation.ollama"
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("reset", True),
+        ("Reset", True),
+        ("RESET", True),
+        ("  reset  ", True),
+        ("please reset the lights", False),
+        ("reset the lights", False),
+        ("reset.", False),
+        ("", False),
+    ],
+)
+def test_is_reset_command(text, expected):
+    assert is_reset_command(text) is expected
+
+
+async def test_reset_conversation_clears_cached_id():
+    router = _router(user_map={7: "ha-a"})
+    router.cache.set("channel:111", "conv-1")
+    await router.reset_conversation("channel:111")
+    assert router.cache.get("channel:111") is None
+
+
+async def test_next_message_after_reset_starts_new_conversation():
+    router = _router(user_map={7: "ha-a"})
+    first = _result("one", conversation_id="conv-1")
+    second = _result("two", conversation_id="conv-2")
+    with patch(_CONVERSE, new=AsyncMock(side_effect=[first, second])) as conv:
+        await router.process(
+            text="hello", discord_user_id=7, conversation_key="channel:111"
+        )
+        assert router.cache.get("channel:111") == "conv-1"
+        await router.reset_conversation("channel:111")
+        await router.process(
+            text="hello again", discord_user_id=7, conversation_key="channel:111"
+        )
+    # First turn passed no id; the reset turn's successor also passed no id,
+    # so the agent started a new conversation instead of resuming conv-1.
+    assert conv.call_args_list[0].args[2] is None
+    assert conv.call_args_list[1].args[2] is None
+    assert router.cache.get("channel:111") == "conv-2"
+
+
+def test_from_entry_reads_channel_idle_minutes():
+    entry = SimpleNamespace(
+        options={
+            CONF_AGENT_ID: "conversation.ollama",
+            CONF_CHANNEL_IDLE_MINUTES: {"111": 30, "bad": 5, "222": "x", "333": 0},
+        }
+    )
+    router = ConversationRouter.from_entry(object(), entry)
+    assert router.channel_idle_minutes == {111: 30}
+    assert router.idle_ttl_for(111) == timedelta(minutes=30)
+    # Threads inherit their parent channel's override.
+    assert router.idle_ttl_for(555, 111) == timedelta(minutes=30)
+    # No override: the cache's global default applies.
+    assert router.idle_ttl_for(999) is None
+
+
+async def test_reset_waits_for_in_flight_turn():
+    """A reset during a running turn is applied after it, so it sticks."""
+    router = _router(user_map={7: "ha-a"})
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return _result("one", conversation_id="conv-old")
+
+    with patch(_CONVERSE, new=AsyncMock(side_effect=slow)):
+        turn = asyncio.create_task(
+            router.process(text="hi", discord_user_id=7, conversation_key="k")
+        )
+        await started.wait()
+        reset = asyncio.create_task(router.reset_conversation("k"))
+        await asyncio.sleep(0)
+        release.set()
+        await turn
+        await reset
+    assert router.cache.get("k") is None
