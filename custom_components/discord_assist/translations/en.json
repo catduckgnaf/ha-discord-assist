@@ -189,6 +189,34 @@
       "no_notes": "No standing preferences are saved yet."
     }
   },
+  "services": {
+    "send_message": {
+      "name": "Send message",
+      "description": "Send a message to a Discord channel or user through a loaded Discord Assist entry. Optionally returns the ID of the message carrying the buttons as response data.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry",
+          "description": "The Discord Assist config entry whose bot sends the message."
+        },
+        "target": {
+          "name": "Target",
+          "description": "Discord channel ID to post to, or Discord user ID to open a direct message with."
+        },
+        "message": {
+          "name": "Message",
+          "description": "Message text to send. Long messages are split into chunks automatically."
+        },
+        "image": {
+          "name": "Image",
+          "description": "Camera entity ID or a path to an image file in an allowed directory."
+        },
+        "buttons": {
+          "name": "Buttons",
+          "description": "Up to 25 buttons, each with an id (the action a discord_assist_action event reports), a label, and optionally a style (primary, secondary, success, or danger), allowed_discord_user_ids, multi_use, and entity_ids whose state is re-checked on press."
+        }
+      }
+    }
+  },
   "entity": {
     "binary_sensor": {
       "gateway": {

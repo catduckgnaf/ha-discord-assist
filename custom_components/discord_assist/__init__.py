@@ -13,9 +13,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.device_registry import DeviceEntryType
+from homeassistant.helpers.typing import ConfigType
 
 from .actions import ACTION, make_action_handler
 from .bot import DiscordAssistClient
@@ -37,6 +39,7 @@ from .conversation_router import ConversationRouter
 from .llm_api import async_setup_llm_api
 from .notes import NotesStore
 from .recent_errors import RecentErrors
+from .services import async_register_services
 from .timers import TimerTracker
 
 _LOGGER = logging.getLogger(__name__)
@@ -91,6 +94,15 @@ def _legacy_entry_uses_same_token(hass: HomeAssistant, token: str) -> bool:
         if legacy.data.get(CONF_TOKEN) == token:
             return True
     return False
+
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the integration's actions once, independent of entries."""
+    async_register_services(hass)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> bool:
