@@ -1,6 +1,6 @@
-"""Tests for retiring stale button messages (issue #27)."""
+"""Retiring stale button messages (issue #27) on the shared button store."""
 
-from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -9,7 +9,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.discord_assist.button_store import ButtonStore
+from custom_components.discord_assist.bot import DiscordAssistClient
+from custom_components.discord_assist.buttons import (
+    ButtonSpec,
+    ButtonStore,
+    async_send_with_buttons,
+    retired_content,
+)
 from custom_components.discord_assist.const import (
     CONF_AGENT_ID,
     CONF_BOT_ID,
@@ -21,14 +27,13 @@ from custom_components.discord_assist.const import (
 from custom_components.discord_assist.retire import (
     EXPIRED_OUTCOME,
     async_prune_expired,
-    async_retire_taken,
 )
-
-CLIENT = "custom_components.discord_assist.DiscordAssistClient"
+from tests.test_buttons import Clock, FakeStore
 
 
 class FakeMessage:
-    def __init__(self, content):
+    def __init__(self, message_id, content):
+        self.id = message_id
         self.content = content
         self.edits = []
 
@@ -39,20 +44,26 @@ class FakeMessage:
 
 
 class FakeChannel:
-    def __init__(self, messages=None):
-        self._messages = messages or {}
+    def __init__(self, channel_id=111):
+        self.id = channel_id
+        self.messages = {}
+
+    async def send(self, content, **kwargs):
+        message = FakeMessage(9000 + len(self.messages), content)
+        self.messages[message.id] = message
+        return message
 
     async def fetch_message(self, message_id):
         try:
-            return self._messages[message_id]
+            return self.messages[message_id]
         except KeyError:
             response = MagicMock(status=404, reason="Not Found")
             raise discord.HTTPException(response, "Unknown Message") from None
 
 
 class FakeClient:
-    def __init__(self, channels=None):
-        self._channels = channels or {}
+    def __init__(self, *channels):
+        self._channels = {channel.id: channel for channel in channels}
 
     def get_channel(self, channel_id):
         return self._channels.get(channel_id)
@@ -61,105 +72,106 @@ class FakeClient:
         return self._channels[channel_id]
 
 
-async def _store(hass: HomeAssistant) -> ButtonStore:
-    store = ButtonStore(hass, "entry-1")
-    await store.async_load()
-    return store
+HEADLINE = "Doorbell: someone is at the door"
 
 
-async def test_handled_message_loses_buttons_and_shows_outcome(hass: HomeAssistant):
-    store = await _store(hass)
-    await store.async_add(
-        channel_id=111, message_id=222, headline="Front door was unlocked"
+async def _post(store, channel, text=f"{HEADLINE}\nSnapshot"):
+    (message,) = await async_send_with_buttons(
+        store,
+        channel,
+        text,
+        [ButtonSpec("Unlock", "act"), ButtonSpec("Ignore", "act")],
     )
-    message = FakeMessage("Front door was unlocked\nPick an action:")
-    client = FakeClient({111: FakeChannel({222: message})})
-
-    assert await async_retire_taken(store, client, 222, "Unlocked by Andrew") is True
-
-    assert len(message.edits) == 1
-    assert message.edits[0]["view"] is None
-    assert "~~Front door was unlocked~~" in message.content
-    assert "Unlocked by Andrew" in message.content
-    # The take is single-use: the record is gone and a retry edits nothing.
-    assert store.get(222) is None
-    assert await async_retire_taken(store, client, 222, "Again") is False
-    assert len(message.edits) == 1
+    return message
 
 
-async def test_unknown_message_fails_cleanly(hass: HomeAssistant):
-    store = await _store(hass)
-    client = FakeClient({111: FakeChannel({})})
-
-    assert await async_retire_taken(store, client, 999, "Unlocked by Andrew") is False
-
-
-async def test_records_survive_reload(hass: HomeAssistant):
-    store = await _store(hass)
-    await store.async_add(channel_id=111, message_id=222, headline="Door alert")
-
-    reloaded = await _store(hass)
-    record = reloaded.get(222)
-    assert record is not None
-    assert record.channel_id == 111
-    assert record.headline == "Door alert"
-
-
-async def test_expired_message_retired_within_one_prune_pass(hass: HomeAssistant):
-    store = await _store(hass)
-    await store.async_add(
-        channel_id=111,
-        message_id=222,
-        headline="Door alert",
-        ttl=timedelta(seconds=-1),
+def test_retired_content_strikes_headline_and_appends_outcome():
+    assert (
+        retired_content("Doorbell\nSnapshot", "Unlocked by Andrew", "Doorbell")
+        == "~~Doorbell~~\nSnapshot\nUnlocked by Andrew"
     )
-    await store.async_add(channel_id=111, message_id=333, headline="Fresh alert")
-    expired_message = FakeMessage("Door alert")
-    fresh_message = FakeMessage("Fresh alert")
-    client = FakeClient({111: FakeChannel({222: expired_message, 333: fresh_message})})
-
-    assert await async_prune_expired(store, client) == 1
-
-    assert len(expired_message.edits) == 1
-    assert expired_message.edits[0]["view"] is None
-    assert "~~Door alert~~" in expired_message.content
-    assert EXPIRED_OUTCOME in expired_message.content
-    assert store.get(222) is None
-    # Unexpired records and their messages are untouched.
-    assert fresh_message.edits == []
-    assert store.get(333) is not None
+    # Headline edited away: prepend it struck.
+    assert retired_content("Snapshot", None, "Doorbell") == "~~Doorbell~~\nSnapshot"
+    # Idempotent.
+    once = retired_content("Doorbell", "Done", "Doorbell")
+    assert retired_content(once, "Done", "Doorbell") == once
 
 
-async def test_prune_cap_per_run_is_respected(hass: HomeAssistant):
-    store = await _store(hass)
-    messages = {}
-    for index in range(12):
-        message_id = 1000 + index
-        await store.async_add(
-            channel_id=111,
-            message_id=message_id,
-            headline=f"Alert {index}",
-            ttl=timedelta(seconds=-1),
-        )
-        messages[message_id] = FakeMessage(f"Alert {index}")
-    client = FakeClient({111: FakeChannel(messages)})
-
-    assert await async_prune_expired(store, client) == 10
-
-    edited = [m for m in messages.values() if m.edits]
-    assert len(edited) == 10
-    assert len(store) == 2
-    # The remaining two are cleared by the next pass.
-    assert await async_prune_expired(store, client) == 2
+async def test_expired_message_retired_within_one_pass():
+    clock = Clock()
+    store = ButtonStore(store=FakeStore(), ttl_seconds=60, now=clock)
+    channel = FakeChannel()
+    message = await _post(store, channel)
+    clock.now += 61
+    assert await async_prune_expired(store, FakeClient(channel)) == 1
+    edit = message.edits[-1]
+    assert edit["view"] is None
+    assert edit["content"] == f"~~{HEADLINE}~~\nSnapshot\n{EXPIRED_OUTCOME}"
+    # Both buttons on the message were one retirement; nothing is left.
+    assert await async_prune_expired(store, FakeClient(channel)) == 0
     assert len(store) == 0
 
 
-@pytest.fixture(autouse=True)
-async def auto_enable_custom_integrations(
-    enable_custom_integrations, setup_core_components
-):
-    """Load the custom integration so the service registration runs."""
-    yield
+async def test_prune_cap_per_run_is_respected():
+    clock = Clock()
+    store = ButtonStore(store=FakeStore(), ttl_seconds=60, now=clock)
+    channel = FakeChannel()
+    for _ in range(5):
+        await _post(store, channel)
+    clock.now += 61
+    client = FakeClient(channel)
+    assert await async_prune_expired(store, client, cap=2) == 2
+    assert await async_prune_expired(store, client, cap=2) == 2
+    assert await async_prune_expired(store, client, cap=2) == 1
+    assert await async_prune_expired(store, client, cap=2) == 0
+
+
+async def test_deleted_message_is_dropped_not_retried():
+    clock = Clock()
+    store = ButtonStore(store=FakeStore(), ttl_seconds=60, now=clock)
+    channel = FakeChannel()
+    message = await _post(store, channel)
+    del channel.messages[message.id]
+    clock.now += 61
+    assert await async_prune_expired(store, FakeClient(channel)) == 0
+    assert await store.async_pop_expired(10) == []
+
+
+async def test_expired_hand_off_survives_restart():
+    clock = Clock()
+    backend = FakeStore()
+    store = ButtonStore(store=backend, ttl_seconds=60, now=clock)
+    await _post(store, FakeChannel())
+    clock.now += 61
+    await store.prune()
+    restarted = ButtonStore(store=backend, ttl_seconds=60, now=clock)
+    assert len(await restarted.async_pop_expired(10)) == 1
+
+
+async def test_pressed_message_is_retired_with_struck_headline():
+    """The dispatcher's own retire strikes the headline too."""
+    store = ButtonStore(store=FakeStore(), ttl_seconds=60, now=Clock())
+    message = await _post(store, FakeChannel())
+    router = MagicMock()
+    router.ha_user_for.return_value = "ha-a"
+    with patch("discord.Client.__init__", return_value=None):
+        client = DiscordAssistClient(
+            hass=object(), router=router, status_signal="s", button_store=store
+        )
+    client.register_button_handler("act", AsyncMock(return_value="Unlocked."))
+    record = next(iter(store._records.values()))
+    interaction = SimpleNamespace(
+        type=discord.InteractionType.component,
+        data={"custom_id": record.custom_id},
+        user=SimpleNamespace(id=7),
+        message=message,
+        response=SimpleNamespace(
+            is_done=MagicMock(return_value=True), defer=AsyncMock()
+        ),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    await client.on_interaction(interaction)
+    assert message.edits[-1]["content"] == f"~~{HEADLINE}~~\nSnapshot\nUnlocked."
 
 
 def _entry():
@@ -171,79 +183,52 @@ def _entry():
     )
 
 
-def _fake_gateway_client(channel):
-    client = MagicMock()
-    client.login = AsyncMock()
-    client.connect = AsyncMock()
-    client.close = AsyncMock()
-    client.is_closed = MagicMock(return_value=True)
-    client.connected = False
-    client.get_channel = MagicMock(return_value=channel)
-    return client
-
-
-async def test_retire_message_service_edits_target(hass: HomeAssistant):
+@pytest.fixture
+async def loaded(
+    hass: HomeAssistant,
+    enable_custom_integrations,
+    fake_discord_client,
+    setup_core_components,
+):
     entry = _entry()
     entry.add_to_hass(hass)
-    message = FakeMessage("Door alert")
-    gateway = _fake_gateway_client(FakeChannel({222: message}))
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    return entry
 
-    with patch(CLIENT, return_value=gateway):
-        assert await hass.config_entries.async_setup(entry.entry_id) is True
-        await hass.async_block_till_done()
-        store = entry.runtime_data.button_store
-        await store.async_add(channel_id=111, message_id=222, headline="Door alert")
 
+async def test_retire_message_action_edits_target(hass: HomeAssistant, loaded):
+    store = loaded.runtime_data.button_store
+    channel = FakeChannel()
+    message = await _post(store, channel)
+    loaded.runtime_data.client.get_channel = MagicMock(return_value=channel)
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_RETIRE_MESSAGE,
+        {
+            "config_entry_id": loaded.entry_id,
+            "channel_id": str(channel.id),
+            "message_id": str(message.id),
+            "outcome": "Handled elsewhere",
+        },
+        blocking=True,
+    )
+    assert message.edits[-1]["view"] is None
+    assert message.edits[-1]["content"].endswith("Handled elsewhere")
+    assert len(store) == 0
+
+
+async def test_retire_message_unknown_message_fails_cleanly(
+    hass: HomeAssistant, loaded
+):
+    with pytest.raises(ServiceValidationError):
         await hass.services.async_call(
             DOMAIN,
             SERVICE_RETIRE_MESSAGE,
             {
-                "config_entry_id": entry.entry_id,
-                "channel_id": 111,
-                "message_id": 222,
-                "outcome": "Unlocked by Andrew",
+                "config_entry_id": loaded.entry_id,
+                "channel_id": "111",
+                "message_id": "424242",
             },
             blocking=True,
         )
-
-    assert len(message.edits) == 1
-    assert message.edits[0]["view"] is None
-    assert "~~Door alert~~" in message.content
-    assert "Unlocked by Andrew" in message.content
-    assert store.get(222) is None
-
-
-async def test_retire_message_service_unknown_record_fails_cleanly(
-    hass: HomeAssistant,
-):
-    entry = _entry()
-    entry.add_to_hass(hass)
-    gateway = _fake_gateway_client(FakeChannel({}))
-
-    with patch(CLIENT, return_value=gateway):
-        assert await hass.config_entries.async_setup(entry.entry_id) is True
-        await hass.async_block_till_done()
-
-        with pytest.raises(ServiceValidationError):
-            await hass.services.async_call(
-                DOMAIN,
-                SERVICE_RETIRE_MESSAGE,
-                {
-                    "config_entry_id": entry.entry_id,
-                    "channel_id": 111,
-                    "message_id": 999,
-                },
-                blocking=True,
-            )
-
-        with pytest.raises(ServiceValidationError):
-            await hass.services.async_call(
-                DOMAIN,
-                SERVICE_RETIRE_MESSAGE,
-                {
-                    "config_entry_id": "no-such-entry",
-                    "channel_id": 111,
-                    "message_id": 222,
-                },
-                blocking=True,
-            )

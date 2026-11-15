@@ -4,50 +4,49 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import aiohttp
 import discord
-import voluptuous as vol
+from homeassistant.components.intent import async_register_timer_handler
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import (
-    ConfigEntryAuthFailed,
-    ConfigEntryNotReady,
-    ServiceValidationError,
-)
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.device_registry import DeviceEntryType
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.typing import ConfigType
 
+from .actions import ACTION, make_action_handler
 from .bot import DiscordAssistClient
-from .button_store import ButtonStore
+from .buttons import ButtonStore
 from .const import (
+    CONF_PLACEHOLDER_DELAY,
     CONF_TOKEN,
+    DEFAULT_PLACEHOLDER_DELAY,
     DOMAIN,
+    ISSUE_DUPLICATE_TOKEN,
     ISSUE_MESSAGE_CONTENT_INTENT,
     ISSUE_NO_AUTHORIZED_USERS,
+    LEGACY_DOMAIN,
     RECONNECT_DELAY,
-    SERVICE_RETIRE_MESSAGE,
     issue_id,
     signal_connection,
 )
 from .conversation_router import ConversationRouter
-from .retire import PRUNE_INTERVAL, async_prune_expired, async_retire_taken
+from .llm_api import async_setup_llm_api
+from .notes import NotesStore
+from .recent_errors import RecentErrors
+from .retire import PRUNE_INTERVAL, async_prune_expired
+from .services import async_register_services
+from .timers import TimerTracker
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.BINARY_SENSOR]
-
-RETIRE_MESSAGE_SCHEMA = vol.Schema(
-    {
-        vol.Required("config_entry_id"): cv.string,
-        vol.Required("channel_id"): vol.Coerce(int),
-        vol.Required("message_id"): vol.Coerce(int),
-        vol.Optional("outcome"): cv.string,
-    }
-)
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.NOTIFY]
 
 
 @dataclass
@@ -56,7 +55,11 @@ class RuntimeData:
 
     client: DiscordAssistClient
     router: ConversationRouter
-    button_store: ButtonStore
+    device_id: str | None = None
+    timers: TimerTracker | None = None
+    notes_store: NotesStore | None = None
+    recent_errors: RecentErrors = field(default_factory=RecentErrors)
+    button_store: ButtonStore | None = None
 
 
 type DiscordConfigEntry = ConfigEntry[RuntimeData]
@@ -78,48 +81,52 @@ def _set_issue(hass: HomeAssistant, entry: ConfigEntry, kind: str, active: bool)
         ir.async_delete_issue(hass, DOMAIN, issue_id(kind, entry.entry_id))
 
 
-def _async_register_retire_service(hass: HomeAssistant) -> None:
-    """Register the domain-wide retire_message service once."""
-    if hass.services.has_service(DOMAIN, SERVICE_RETIRE_MESSAGE):
-        return
+def _legacy_entry_uses_same_token(hass: HomeAssistant, token: str) -> bool:
+    """Whether an enabled legacy entry is loaded with the same bot token.
 
-    async def _retire_message(call: ServiceCall) -> None:
-        entry_id = call.data["config_entry_id"]
-        entry = hass.config_entries.async_get_entry(entry_id)
-        runtime = getattr(entry, "runtime_data", None) if entry else None
-        if entry is None or entry.domain != DOMAIN or runtime is None:
-            raise ServiceValidationError(
-                f"No Discord Assist config entry with id {entry_id}"
-            )
-        store: ButtonStore = runtime.button_store
-        record = store.get(call.data["message_id"])
-        if record is None or record.channel_id != call.data["channel_id"]:
-            raise ServiceValidationError(
-                "No button message with that channel and message id is "
-                "being tracked for this entry"
-            )
-        retired = await async_retire_taken(
-            store,
-            runtime.client,
-            record.message_id,
-            call.data.get("outcome"),
-        )
-        if not retired:
-            raise ServiceValidationError(
-                "The tracked Discord message could not be found to retire it"
-            )
+    Home Assistant loads every enabled config entry at startup, so an
+    enabled Discord Conversation entry with this token will run the same
+    bot in a second process. A disabled entry (for example the one left
+    behind by the import flow in the config flow) is not running and
+    does not count.
+    """
+    for legacy in hass.config_entries.async_entries(LEGACY_DOMAIN):
+        if getattr(legacy, "disabled_by", None) is not None:
+            continue
+        if legacy.data.get(CONF_TOKEN) == token:
+            return True
+    return False
 
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_RETIRE_MESSAGE,
-        _retire_message,
-        schema=RETIRE_MESSAGE_SCHEMA,
-    )
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the integration's actions once, independent of entries."""
+    async_register_services(hass)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> bool:
     """Set up Discord Assist from a config entry."""
-    router = ConversationRouter.from_entry(hass, entry)
+    # The integration's own device for this entry (the same device the
+    # gateway sensor attaches to). Channels that are not mapped to a room
+    # send their requests as this device, and its registered timer handler
+    # is what makes Assist timers work for those channels. It is not
+    # assigned to an area: an unmapped channel has no knowable room, and
+    # room-mapped channels keep using their room device instead.
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, str(entry.unique_id))},
+        name=entry.title,
+        manufacturer="Discord",
+        entry_type=DeviceEntryType.SERVICE,
+    )
+
+    notes_store = NotesStore(hass, entry.entry_id)
+    await notes_store.async_load()
+    router = ConversationRouter.from_entry(hass, entry, notes_store=notes_store)
+    router.integration_device_id = device.id
     if not router.has_authorized_users:
         _LOGGER.warning(
             "No Discord users are authorized for %s; the bot will ignore everyone "
@@ -128,8 +135,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         )
     _set_issue(hass, entry, ISSUE_NO_AUTHORIZED_USERS, not router.has_authorized_users)
     _set_issue(hass, entry, ISSUE_MESSAGE_CONTENT_INTENT, False)
+    _set_issue(
+        hass,
+        entry,
+        ISSUE_DUPLICATE_TOKEN,
+        _legacy_entry_uses_same_token(hass, entry.data.get(CONF_TOKEN, "")),
+    )
 
-    client = DiscordAssistClient(hass, router, signal_connection(entry.entry_id))
+    recent_errors = RecentErrors()
+    button_store = ButtonStore(hass, entry.entry_id)
+    await button_store.async_load()
+    client = DiscordAssistClient(
+        hass,
+        router,
+        signal_connection(entry.entry_id),
+        button_store=button_store,
+        placeholder_delay=float(
+            entry.options.get(CONF_PLACEHOLDER_DELAY, DEFAULT_PLACEHOLDER_DELAY)
+        ),
+        recent_errors=recent_errors,
+        entry_title=entry.title,
+    )
+    client.register_button_handler(
+        ACTION, make_action_handler(hass, client, entry.entry_id)
+    )
     # Log in over REST first so a dead network or bad token surfaces here,
     # where Home Assistant retries with backoff or starts reauth.
     try:
@@ -141,33 +170,66 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         await client.close()
         raise ConfigEntryNotReady(f"Could not reach Discord: {err}") from err
 
-    button_store = ButtonStore(hass, entry.entry_id)
-    await button_store.async_load()
+    timers = TimerTracker(
+        hass,
+        client.send_timer_message,
+        timer_mention=router.timer_mention,
+        # Kept across reloads: an options save reloads the entry, and a
+        # timer started before it must still be announced after it.
+        timers=hass.data.setdefault(DOMAIN, {}).setdefault(
+            f"timers_{entry.entry_id}", {}
+        ),
+    )
+    router.timer_tracker = timers
+    try:
+        entry.async_on_unload(
+            async_register_timer_handler(hass, device.id, timers.handle_event)
+        )
+    except KeyError:
+        # The intent component provides the timer manager; it is a declared
+        # dependency, so this should not happen, but timers failing must not
+        # take the whole entry down with them.
+        _LOGGER.warning(
+            "Timer manager is not available for %s; Assist timers are disabled",
+            entry.title,
+        )
+
     entry.runtime_data = RuntimeData(
-        client=client, router=router, button_store=button_store
+        client=client,
+        router=router,
+        recent_errors=recent_errors,
+        notes_store=notes_store,
+        device_id=device.id,
+        timers=timers,
+        button_store=button_store,
     )
 
-    async def _prune_expired(_now) -> None:
+    # Permissions phase B: expose the scoped LLM API so agents serving
+    # Discord speakers can be limited to the speaker's scope.
+    async_setup_llm_api(hass, entry)
+
+    async def _retire_expired(_now) -> None:
         await async_prune_expired(button_store, client)
 
     entry.async_on_unload(
         async_track_time_interval(
-            hass, _prune_expired, PRUNE_INTERVAL, cancel_on_shutdown=True
+            hass, _retire_expired, PRUNE_INTERVAL, cancel_on_shutdown=True
         )
     )
-    _async_register_retire_service(hass)
 
     async def _run() -> None:
         try:
             await client.connect(reconnect=True)
-        except discord.PrivilegedIntentsRequired:
+        except discord.PrivilegedIntentsRequired as err:
+            recent_errors.record(err, source="gateway")
             _LOGGER.error(
                 "Discord refused the Message Content intent; enable it for the "
                 "bot in the Discord Developer Portal, then reload the entry"
             )
             _set_issue(hass, entry, ISSUE_MESSAGE_CONTENT_INTENT, True)
             return
-        except Exception:  # noqa: BLE001
+        except Exception as err:  # noqa: BLE001
+            recent_errors.record(err, source="gateway")
             _LOGGER.exception("Discord gateway task failed")
         if client.is_closed():
             return
@@ -196,6 +258,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> 
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Clean up repair issues when the entry is deleted."""
-    for kind in (ISSUE_NO_AUTHORIZED_USERS, ISSUE_MESSAGE_CONTENT_INTENT):
+    """Clean up repair issues and stored notes when the entry is deleted."""
+    await NotesStore(hass, entry.entry_id).async_remove()
+    await ButtonStore(hass, entry.entry_id).async_remove()
+    hass.data.get(DOMAIN, {}).pop(f"timers_{entry.entry_id}", None)
+    for kind in (
+        ISSUE_NO_AUTHORIZED_USERS,
+        ISSUE_MESSAGE_CONTENT_INTENT,
+        ISSUE_DUPLICATE_TOKEN,
+    ):
         ir.async_delete_issue(hass, DOMAIN, issue_id(kind, entry.entry_id))
