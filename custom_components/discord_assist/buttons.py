@@ -1,336 +1,460 @@
-"""Persistent action buttons that re-check entity state on press.
+"""Persistent, restart-surviving Discord buttons.
 
-Roadmap suggestion 25 (issue #30): a button posted minutes ago may act on a
-world that changed ("Close garage" after someone already closed and reopened
-it). Each button record therefore stores the entity ids and the state (and
-``last_changed``) it was posted against. On press, the dispatcher re-reads
-those entities from ``hass.states`` before firing the action event; if
-anything changed, the press is refused, no event fires, and the buttons are
-retired from the message.
+Buttons carry a stateless ``custom_id`` of the form ``da:<action>:<record_id>``
+and no ``discord.ui.View`` needs to stay alive for them to work. The record
+(who may press, what to do, when it expires) is persisted in a Home Assistant
+``Store``, so a button posted before a restart still works after it.
 
-This is the smallest self-contained substrate for that behavior: a persistent
-record store plus a press handler. The general button dispatcher (#13) and
-the actionable-notification events (#24) are separate lanes; when they land,
-their dispatcher should call :func:`find_state_changes` (or this handler)
-before running an action, and records created there should carry the same
-expectations this module stores.
+A press is single-use unless the record says ``multi_use``:
+:meth:`ButtonStore.take` pops the record, and every sibling posted on the
+same message (same ``group_id``), under one lock, so a second press of any
+of them finds nothing and is refused as already handled.
+
+Consumers (actionable events, clarify answers, approvals) register a handler
+per action on the client and post buttons through
+:func:`async_send_with_buttons`, which records, binds and sends in one place.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import uuid
-from dataclasses import dataclass, field
-from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+import re
+import secrets
+import time
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import dataclass, field, replace
+from typing import Any
 
-from homeassistant.core import Context, HomeAssistant
+import discord
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
-from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, EVENT_BUTTON_ACTION
-
-if TYPE_CHECKING:
-    from .conversation_router import ConversationRouter
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-CUSTOM_ID_PREFIX = "da:act:"
+PREFIX = "da"
 STORAGE_VERSION = 1
-DEFAULT_TTL = timedelta(hours=1)
+# Print Handy uses the same horizon for its alert buttons.
+DEFAULT_TTL_SECONDS = 24 * 3600
+MAX_CUSTOM_ID_LENGTH = 100
 
-ALREADY_HANDLED_REPLY = "That button has already been used or has expired."
-NOT_AUTHORIZED_REPLY = "You are not authorized to use this button."
+# Actions and record ids go inside a custom_id, so they must never contain
+# the separator (or whitespace, which Discord rejects in practice).
+_PART_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 @dataclass(frozen=True)
-class EntityExpectation:
-    """The state one entity was in when a button was posted."""
+class ButtonOutcome:
+    """What the dispatcher does after a handler ran.
 
-    entity_id: str
-    state: str | None
-    last_changed: str | None
+    ``outcome`` is a line appended to the button's message, ``ephemeral``
+    is shown only to the presser, and ``retire`` strips the buttons from
+    the message (ignored for multi-use records, which keep theirs).
+    """
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "entity_id": self.entity_id,
-            "state": self.state,
-            "last_changed": self.last_changed,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> EntityExpectation:
-        return cls(
-            entity_id=data["entity_id"],
-            state=data.get("state"),
-            last_changed=data.get("last_changed"),
-        )
+    outcome: str | None = None
+    ephemeral: str | None = None
+    retire: bool = True
 
 
-@dataclass
+# A button action handler: given the claimed record and the raw interaction,
+# return a ButtonOutcome, a plain text (shown to the presser and appended to
+# the message), or None for the generic acknowledgement.
+ButtonHandler = Callable[["ButtonRecord", Any], Awaitable["ButtonOutcome | str | None"]]
+
+
+def make_custom_id(action: str, record_id: str) -> str:
+    """Build ``da:<action>:<record_id>``, enforcing Discord's 100 char limit."""
+    if not _PART_RE.match(action or ""):
+        raise ValueError(f"Invalid button action: {action!r}")
+    if not _PART_RE.match(record_id or ""):
+        raise ValueError(f"Invalid button record id: {record_id!r}")
+    custom_id = f"{PREFIX}:{action}:{record_id}"
+    assert len(custom_id) <= MAX_CUSTOM_ID_LENGTH, (
+        f"custom_id is {len(custom_id)} characters; Discord allows at most "
+        f"{MAX_CUSTOM_ID_LENGTH}"
+    )
+    if len(custom_id) > MAX_CUSTOM_ID_LENGTH:  # pragma: no cover - assert guards
+        raise ValueError(f"custom_id exceeds {MAX_CUSTOM_ID_LENGTH} characters")
+    return custom_id
+
+
+def parse_custom_id(custom_id: str | None) -> tuple[str, str] | None:
+    """Split a custom_id into ``(action, record_id)``, or None if not ours.
+
+    Anything without our exact ``da:`` prefix (other bots, other features,
+    malformed ids) returns None so the dispatcher can ignore it.
+    """
+    if not custom_id or not isinstance(custom_id, str):
+        return None
+    parts = custom_id.split(":", 2)
+    if len(parts) != 3 or parts[0] != PREFIX:
+        return None
+    action, record_id = parts[1], parts[2]
+    if not _PART_RE.match(action) or not _PART_RE.match(record_id):
+        return None
+    return action, record_id
+
+
+def _optional_int(value: Any) -> int | None:
+    return None if value is None else int(value)
+
+
+@dataclass(frozen=True)
 class ButtonRecord:
-    """One posted action button and the world it was posted against."""
+    """One pending button: who may press it and what pressing it means."""
 
     record_id: str
     action: str
-    config_entry_id: str
+    created_at: float
+    expires_at: float
+    allowed_user_ids: tuple[int, ...] = ()
+    payload: Mapping[str, Any] = field(default_factory=dict)
+    # Buttons posted on one message share a group: pressing one claims them
+    # all, so a Yes/No pair can never both run.
+    group_id: str | None = None
+    multi_use: bool = False
     channel_id: int | None = None
     message_id: int | None = None
-    expectations: tuple[EntityExpectation, ...] = ()
-    data: dict[str, Any] = field(default_factory=dict)
-    expires_at: str | None = None
+
+    @property
+    def custom_id(self) -> str:
+        return make_custom_id(self.action, self.record_id)
+
+    def is_expired(self, now: float) -> bool:
+        return now >= self.expires_at
+
+    def allows(self, discord_user_id: int) -> bool:
+        """Whether this record names ``discord_user_id`` as a presser.
+
+        An empty allowlist names nobody in particular; the dispatcher still
+        requires the presser to be an authorized bot user (fail closed at
+        that layer). A non-empty list is an exact restriction.
+        """
+        return not self.allowed_user_ids or discord_user_id in self.allowed_user_ids
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "record_id": self.record_id,
             "action": self.action,
-            "config_entry_id": self.config_entry_id,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+            "allowed_user_ids": list(self.allowed_user_ids),
+            "payload": dict(self.payload),
+            "group_id": self.group_id,
+            "multi_use": self.multi_use,
             "channel_id": self.channel_id,
             "message_id": self.message_id,
-            "expectations": [exp.to_dict() for exp in self.expectations],
-            "data": self.data,
-            "expires_at": self.expires_at,
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ButtonRecord:
-        return cls(
-            record_id=data["record_id"],
-            action=data["action"],
-            config_entry_id=data["config_entry_id"],
-            channel_id=data.get("channel_id"),
-            message_id=data.get("message_id"),
-            expectations=tuple(
-                EntityExpectation.from_dict(exp) for exp in data.get("expectations", [])
-            ),
-            data=dict(data.get("data") or {}),
-            expires_at=data.get("expires_at"),
-        )
-
-    @property
-    def expired(self) -> bool:
-        if self.expires_at is None:
-            return False
-        expires = dt_util.parse_datetime(self.expires_at)
-        return expires is not None and expires <= dt_util.utcnow()
-
-
-def custom_id_for(record_id: str) -> str:
-    """Discord custom_id carrying a button record id."""
-    return f"{CUSTOM_ID_PREFIX}{record_id}"
-
-
-def record_id_from_custom_id(custom_id: str | None) -> str | None:
-    """Record id out of a custom_id, or None for other components."""
-    if not custom_id or not custom_id.startswith(CUSTOM_ID_PREFIX):
-        return None
-    return custom_id[len(CUSTOM_ID_PREFIX) :] or None
-
-
-def capture_expectations(
-    hass: HomeAssistant, entity_ids: list[str]
-) -> tuple[EntityExpectation, ...]:
-    """Snapshot the current state of each entity a button will act on."""
-    expectations = []
-    for entity_id in entity_ids:
-        state = hass.states.get(entity_id)
-        expectations.append(
-            EntityExpectation(
-                entity_id=entity_id,
-                state=state.state if state is not None else None,
-                last_changed=(
-                    state.last_changed.isoformat() if state is not None else None
+    def from_dict(cls, data: Mapping[str, Any]) -> ButtonRecord | None:
+        try:
+            return cls(
+                record_id=str(data["record_id"]),
+                action=str(data["action"]),
+                created_at=float(data["created_at"]),
+                expires_at=float(data["expires_at"]),
+                allowed_user_ids=tuple(
+                    int(value) for value in data.get("allowed_user_ids") or ()
                 ),
+                payload=dict(data.get("payload") or {}),
+                group_id=(
+                    str(data["group_id"]) if data.get("group_id") is not None else None
+                ),
+                multi_use=bool(data.get("multi_use", False)),
+                channel_id=_optional_int(data.get("channel_id")),
+                message_id=_optional_int(data.get("message_id")),
             )
-        )
-    return tuple(expectations)
-
-
-def make_record(
-    hass: HomeAssistant,
-    *,
-    action: str,
-    config_entry_id: str,
-    entity_ids: list[str],
-    channel_id: int | None = None,
-    message_id: int | None = None,
-    data: dict[str, Any] | None = None,
-    ttl: timedelta | None = DEFAULT_TTL,
-) -> ButtonRecord:
-    """Build a record for a button about to be posted, snapshotting state."""
-    return ButtonRecord(
-        record_id=uuid.uuid4().hex,
-        action=action,
-        config_entry_id=config_entry_id,
-        channel_id=channel_id,
-        message_id=message_id,
-        expectations=capture_expectations(hass, entity_ids),
-        data=dict(data or {}),
-        expires_at=(dt_util.utcnow() + ttl).isoformat() if ttl else None,
-    )
-
-
-def find_state_changes(hass: HomeAssistant, record: ButtonRecord) -> list[str]:
-    """Human-readable ways the world moved on since the button was posted.
-
-    An empty list means every entity the record names is exactly as it was:
-    same state string and same ``last_changed``. An entity that no longer
-    exists counts as changed.
-    """
-    changes: list[str] = []
-    for expected in record.expectations:
-        current = hass.states.get(expected.entity_id)
-        if current is None:
-            if expected.state is not None:
-                changes.append(f"{expected.entity_id} no longer exists")
-            continue
-        if expected.state is None:
-            changes.append(f"{expected.entity_id} appeared (now {current.state})")
-        elif current.state != expected.state:
-            changes.append(
-                f"{expected.entity_id} is now {current.state} (was {expected.state})"
-            )
-        elif current.last_changed.isoformat() != expected.last_changed:
-            changes.append(
-                f"{expected.entity_id} changed again at "
-                f"{current.last_changed.isoformat()}"
-            )
-    return changes
+        except KeyError, TypeError, ValueError:
+            _LOGGER.warning("Dropping malformed button record: %r", data)
+            return None
 
 
 class ButtonStore:
-    """Persistent, single-use store for button records, one per config entry."""
+    """Button records persisted in a Home Assistant ``Store`` (per entry).
 
-    def __init__(self, hass: HomeAssistant, config_entry_id: str) -> None:
-        self._store: Store[dict[str, Any]] = Store(
-            hass, STORAGE_VERSION, f"{DOMAIN}.buttons.{config_entry_id}"
-        )
+    ``store`` is injectable so tests can pass a simple fake with
+    ``async_load`` / ``async_save`` instead of a real HA storage backend;
+    that fake is also what proves a record survives a "restart" (a new
+    ButtonStore over the same persisted data).
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant | None = None,
+        entry_id: str = "",
+        *,
+        store: Any | None = None,
+        ttl_seconds: float = DEFAULT_TTL_SECONDS,
+        now: Callable[[], float] = time.time,
+    ) -> None:
+        if store is None:
+            if hass is None:
+                raise ValueError("ButtonStore needs a hass or an explicit store")
+            store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_buttons_{entry_id}")
+        self._store: Store | Any = store
+        self._ttl = float(ttl_seconds)
+        self._now = now
         self._records: dict[str, ButtonRecord] = {}
         self._loaded = False
+        self._lock = asyncio.Lock()
 
     async def async_load(self) -> None:
-        """Load persisted records (buttons survive a restart until pressed)."""
-        data = await self._store.async_load()
-        self._records = {}
-        for raw in (data or {}).get("records", []):
-            try:
-                record = ButtonRecord.from_dict(raw)
-            except KeyError, TypeError, ValueError:
-                _LOGGER.warning("Ignoring malformed button record: %r", raw)
-                continue
-            if not record.expired:
-                self._records[record.record_id] = record
+        """Load persisted records, pruning expired or malformed rows."""
+        async with self._lock:
+            await self._load_locked()
+
+    async def _load_locked(self) -> None:
+        if self._loaded:
+            return
         self._loaded = True
+        data = await self._store.async_load()
+        records: dict[str, ButtonRecord] = {}
+        if isinstance(data, Mapping):
+            raw = data.get("records")
+            if isinstance(raw, Mapping):
+                for value in raw.values():
+                    if isinstance(value, Mapping):
+                        record = ButtonRecord.from_dict(value)
+                        if record is not None:
+                            records[record.record_id] = record
+        self._records = records
+        if self._prune_locked():
+            await self._save_locked()
 
-    async def _async_ensure_loaded(self) -> None:
-        if not self._loaded:
-            await self.async_load()
+    def _prune_locked(self) -> bool:
+        """Drop expired records; return True if anything was dropped."""
+        now = self._now()
+        expired = [key for key, rec in self._records.items() if rec.is_expired(now)]
+        for key in expired:
+            del self._records[key]
+        return bool(expired)
 
-    async def _async_save(self) -> None:
+    async def _save_locked(self) -> None:
+        self._prune_locked()
         await self._store.async_save(
-            {"records": [record.to_dict() for record in self._records.values()]}
+            {"records": {key: rec.to_dict() for key, rec in self._records.items()}}
         )
 
-    async def async_add(self, record: ButtonRecord) -> None:
-        """Persist a record for a button that was just posted."""
-        await self._async_ensure_loaded()
-        self._records[record.record_id] = record
-        await self._async_save()
+    async def record(
+        self,
+        action: str,
+        *,
+        payload: Mapping[str, Any] | None = None,
+        allowed_user_ids: Iterable[int] = (),
+        ttl_seconds: float | None = None,
+        record_id: str | None = None,
+        group_id: str | None = None,
+        multi_use: bool = False,
+    ) -> ButtonRecord:
+        """Create and persist a button record; returns it (use its custom_id).
 
-    def get(self, record_id: str) -> ButtonRecord | None:
-        """The record for an id, without consuming it."""
-        return self._records.get(record_id)
-
-    async def async_take(self, record_id: str) -> ButtonRecord | None:
-        """Consume a record: it can be acted on exactly once.
-
-        Returns None when the record is unknown or already expired; an
-        expired record is still removed so it cannot be pressed later.
+        Ids are short random tokens (never entity ids or text), and the
+        resulting custom_id is asserted to fit Discord's 100 character limit.
         """
-        await self._async_ensure_loaded()
-        record = self._records.pop(record_id, None)
-        if record is None:
-            return None
-        await self._async_save()
-        return None if record.expired else record
-
-
-async def _ephemeral(interaction: Any, text: str) -> None:
-    """Reply so only the presser sees it, before or after acknowledging."""
-    if interaction.response.is_done():
-        await interaction.followup.send(text, ephemeral=True)
-    else:
-        await interaction.response.send_message(text, ephemeral=True)
-
-
-async def _retire(interaction: Any) -> None:
-    """Remove the buttons from the pressed message."""
-    message = getattr(interaction, "message", None)
-    if message is None:
-        return
-    try:
-        await message.edit(view=None)
-    except Exception:  # noqa: BLE001 - retiring is best-effort
-        _LOGGER.warning("Failed to retire buttons from a message", exc_info=True)
-
-
-async def async_handle_button_press(
-    hass: HomeAssistant,
-    *,
-    store: ButtonStore,
-    router: ConversationRouter,
-    interaction: Any,
-) -> None:
-    """Handle one action-button press, re-checking state before firing.
-
-    The record is consumed either way (single-use). When the state moved on,
-    no event fires: the presser is told ephemerally that nothing changed and
-    the buttons are retired from the message.
-    """
-    record_id = record_id_from_custom_id(
-        (getattr(interaction, "data", None) or {}).get("custom_id")
-    )
-    if record_id is None:
-        return
-    record = await store.async_take(record_id)
-    if record is None:
-        await _ephemeral(interaction, ALREADY_HANDLED_REPLY)
-        return
-
-    presser = interaction.user
-    ha_user_id = router.ha_user_for(presser.id)
-    if ha_user_id is None:
-        # Fail closed: an unmapped presser never fires an action.
-        await _ephemeral(interaction, NOT_AUTHORIZED_REPLY)
-        return
-
-    changes = find_state_changes(hass, record)
-    if changes:
-        await _retire(interaction)
-        await _ephemeral(
-            interaction,
-            "Nothing changed: "
-            + "; ".join(changes)
-            + ". The state already moved on, so nothing was done "
-            "and the buttons were retired.",
+        record_id = record_id or secrets.token_urlsafe(8)
+        now = self._now()
+        ttl = self._ttl if ttl_seconds is None else float(ttl_seconds)
+        record = ButtonRecord(
+            record_id=record_id,
+            action=action,
+            created_at=now,
+            expires_at=now + ttl,
+            allowed_user_ids=tuple(int(value) for value in allowed_user_ids),
+            payload=dict(payload or {}),
+            group_id=group_id,
+            multi_use=bool(multi_use),
         )
-        return
+        # Raises (assert / ValueError) before anything is persisted when the
+        # action or id would push the custom_id past Discord's limit.
+        _ = record.custom_id
+        async with self._lock:
+            await self._load_locked()
+            self._records[record.record_id] = record
+            await self._save_locked()
+        return record
 
-    # Acknowledge first (the 3 second interaction deadline), then fire.
-    if not interaction.response.is_done():
-        await interaction.response.defer()
-    event_data = {
-        **record.data,
-        "action": record.action,
-        "message_id": record.message_id,
-        "channel_id": record.channel_id,
-        "discord_user_id": presser.id,
-        "discord_user_name": getattr(presser, "display_name", None)
-        or getattr(presser, "name", None),
-        "ha_user_id": ha_user_id,
-        "config_entry_id": record.config_entry_id,
-    }
-    hass.bus.async_fire(
-        EVENT_BUTTON_ACTION, event_data, context=Context(user_id=ha_user_id)
-    )
-    await _retire(interaction)
+    async def peek(self, record_id: str) -> ButtonRecord | None:
+        """Return a fresh record without claiming it, or None.
+
+        Expired records are refused and pruned (and the prune is saved).
+        """
+        async with self._lock:
+            await self._load_locked()
+            record = self._records.get(record_id)
+            if record is None:
+                return None
+            if record.is_expired(self._now()):
+                del self._records[record_id]
+                await self._save_locked()
+                return None
+            return record
+
+    async def take(self, record_id: str) -> ButtonRecord | None:
+        """Claim a record: pop it and its siblings under the lock.
+
+        A second take (or a take of an expired record) returns None, so each
+        button press is single-use, and claiming one button of a group
+        claims the whole group. A ``multi_use`` record is returned without
+        being removed.
+        """
+        async with self._lock:
+            await self._load_locked()
+            record = self._records.get(record_id)
+            if record is None:
+                return None
+            if record.is_expired(self._now()):
+                del self._records[record_id]
+                await self._save_locked()
+                return None
+            if record.multi_use:
+                return record
+            del self._records[record_id]
+            if record.group_id is not None:
+                for key in [
+                    key
+                    for key, rec in self._records.items()
+                    if rec.group_id == record.group_id
+                ]:
+                    del self._records[key]
+            await self._save_locked()
+            return record
+
+    async def bind_message(
+        self, record_ids: Iterable[str], *, channel_id: int, message_id: int
+    ) -> None:
+        """Remember which Discord message carries these records' buttons."""
+        ids = set(record_ids)
+        async with self._lock:
+            await self._load_locked()
+            changed = False
+            for key in ids:
+                record = self._records.get(key)
+                if record is not None:
+                    self._records[key] = replace(
+                        record, channel_id=channel_id, message_id=message_id
+                    )
+                    changed = True
+            if changed:
+                await self._save_locked()
+
+    async def async_remove_where(
+        self, predicate: Callable[[ButtonRecord], bool]
+    ) -> list[ButtonRecord]:
+        """Remove and return every record matching ``predicate``."""
+        async with self._lock:
+            await self._load_locked()
+            removed = [rec for rec in self._records.values() if predicate(rec)]
+            for rec in removed:
+                del self._records[rec.record_id]
+            if removed:
+                await self._save_locked()
+            return removed
+
+    async def async_remove(self) -> None:
+        """Delete the persisted records (the config entry was removed)."""
+        async with self._lock:
+            self._records = {}
+            remove = getattr(self._store, "async_remove", None)
+            if callable(remove):
+                await remove()
+
+    async def prune(self) -> int:
+        """Prune expired records now; returns how many were dropped."""
+        async with self._lock:
+            await self._load_locked()
+            before = len(self._records)
+            if self._prune_locked():
+                await self._save_locked()
+            return before - len(self._records)
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+
+@dataclass(frozen=True)
+class ButtonSpec:
+    """One button to post: its label, action and what the handler needs."""
+
+    label: str
+    action: str
+    payload: Mapping[str, Any] = field(default_factory=dict)
+    style: discord.ButtonStyle = discord.ButtonStyle.secondary
+    allowed_user_ids: tuple[int, ...] = ()
+    multi_use: bool = False
+
+
+def retired_content(content: str | None, outcome: str | None) -> str | None:
+    """The message text after a press: the original plus the outcome line."""
+    if not outcome:
+        return content
+    base = content or ""
+    return f"{base}\n{outcome}" if base else outcome
+
+
+async def async_send_with_buttons(
+    store: ButtonStore,
+    channel: Any,
+    text: str,
+    specs: Iterable[ButtonSpec],
+    *,
+    send: Callable[..., Awaitable[Any]] | None = None,
+    ttl_seconds: float | None = None,
+    **send_kwargs: Any,
+) -> list[Any]:
+    """Record, send and bind one message's buttons; return the sent messages.
+
+    All buttons on the message share one group, so pressing one claims
+    them all. Long text is chunked and the buttons ride on the last chunk.
+    The view is stopped before sending: dispatch goes through the client's
+    ``on_interaction`` by custom_id, and a running ``View(timeout=None)``
+    would otherwise sit in discord.py's view store for the life of the
+    client. ``send`` defaults to ``channel.send``; pass the client's
+    recording ``send_to_channel`` (bound to the channel) to have the
+    messages recorded as ours.
+    """
+    from .text_utils import chunk_message
+
+    group_id = secrets.token_urlsafe(6)
+    records = [
+        await store.record(
+            spec.action,
+            payload=spec.payload,
+            allowed_user_ids=spec.allowed_user_ids,
+            ttl_seconds=ttl_seconds,
+            group_id=group_id,
+            multi_use=spec.multi_use,
+        )
+        for spec in specs
+    ]
+    view = discord.ui.View(timeout=None)
+    for spec, record in zip(specs, records, strict=True):
+        view.add_item(
+            discord.ui.Button(
+                label=spec.label[:80], style=spec.style, custom_id=record.custom_id
+            )
+        )
+    view.stop()
+    send = send or channel.send
+    parts = chunk_message(text)
+    sent: list[Any] = []
+    for index, part in enumerate(parts):
+        kwargs: dict[str, Any] = {"allowed_mentions": discord.AllowedMentions.none()}
+        if index == len(parts) - 1:
+            kwargs.update(send_kwargs)
+            if records:
+                kwargs["view"] = view
+        sent.append(await send(part, **kwargs))
+    last = sent[-1] if sent else None
+    message_id = getattr(last, "id", None)
+    channel_id = getattr(channel, "id", None)
+    if records and isinstance(message_id, int) and isinstance(channel_id, int):
+        await store.bind_message(
+            [record.record_id for record in records],
+            channel_id=channel_id,
+            message_id=message_id,
+        )
+    return sent
