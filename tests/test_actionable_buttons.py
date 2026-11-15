@@ -111,7 +111,7 @@ async def test_press_fires_one_event_as_the_presser(hass: HomeAssistant):
     edit = message.edit.await_args.kwargs
     assert edit["view"] is None
     assert edit["content"] == (
-        "Someone is at the door\nCatduck pressed Unlock front door"
+        "~~Someone is at the door~~\nCatduck pressed Unlock front door"
     )
     # The sibling button on the same message is claimed with it.
     await client.on_interaction(_press(message, ids[1]))

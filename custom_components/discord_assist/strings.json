@@ -215,6 +215,28 @@
           "description": "Up to 25 buttons, each with an id (the action a discord_assist_action event reports), a label, and optionally a style (primary, secondary, success, or danger), allowed_discord_user_ids, multi_use, and entity_ids whose state is re-checked on press."
         }
       }
+    },
+    "retire_message": {
+      "name": "Retire message",
+      "description": "Remove the buttons from a tracked Discord button message, strike through its headline, and optionally append an outcome line. Use this from an automation when the alert the message offered is no longer valid.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry",
+          "description": "The Discord Assist config entry that sent the message."
+        },
+        "channel_id": {
+          "name": "Channel ID",
+          "description": "The Discord channel the button message is in."
+        },
+        "message_id": {
+          "name": "Message ID",
+          "description": "The Discord message to retire."
+        },
+        "outcome": {
+          "name": "Outcome",
+          "description": "Optional line appended to the message, for example \"Unlocked by Andrew\"."
+        }
+      }
     }
   },
   "entity": {

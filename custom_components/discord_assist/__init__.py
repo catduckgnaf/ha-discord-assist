@@ -17,6 +17,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.device_registry import DeviceEntryType
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
 
 from .actions import ACTION, make_action_handler
@@ -39,6 +40,7 @@ from .conversation_router import ConversationRouter
 from .llm_api import async_setup_llm_api
 from .notes import NotesStore
 from .recent_errors import RecentErrors
+from .retire import PRUNE_INTERVAL, async_prune_expired
 from .services import async_register_services
 from .timers import TimerTracker
 
@@ -205,6 +207,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
     # Permissions phase B: expose the scoped LLM API so agents serving
     # Discord speakers can be limited to the speaker's scope.
     async_setup_llm_api(hass, entry)
+
+    async def _retire_expired(_now) -> None:
+        await async_prune_expired(button_store, client)
+
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass, _retire_expired, PRUNE_INTERVAL, cancel_on_shutdown=True
+        )
+    )
 
     async def _run() -> None:
         try:

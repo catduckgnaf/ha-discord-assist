@@ -25,7 +25,8 @@ from homeassistant.core import (
 from homeassistant.exceptions import ServiceValidationError, Unauthorized
 from homeassistant.helpers import config_validation as cv
 
-from .const import DOMAIN, SERVICE_SEND_MESSAGE
+from .const import DOMAIN, SERVICE_RETIRE_MESSAGE, SERVICE_SEND_MESSAGE
+from .retire import async_edit_retired
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -67,6 +68,32 @@ SEND_MESSAGE_SCHEMA = vol.Schema(
         vol.Optional("buttons"): vol.All([_BUTTON_SCHEMA], vol.Length(max=25)),
     }
 )
+
+
+RETIRE_MESSAGE_SCHEMA = vol.Schema(
+    {
+        vol.Required("config_entry_id"): cv.string,
+        vol.Required("channel_id"): vol.Coerce(int),
+        vol.Required("message_id"): vol.Coerce(int),
+        vol.Optional("outcome"): cv.string,
+    }
+)
+
+
+def _loaded_runtime(hass: HomeAssistant, config_entry_id: str) -> Any:
+    """The runtime data of a loaded Discord Assist entry, or raise."""
+    entry = hass.config_entries.async_get_entry(config_entry_id)
+    runtime = getattr(entry, "runtime_data", None) if entry is not None else None
+    if (
+        entry is None
+        or entry.domain != DOMAIN
+        or entry.state is not ConfigEntryState.LOADED
+        or getattr(runtime, "client", None) is None
+    ):
+        raise ServiceValidationError(
+            f"Discord Assist config entry is not loaded: {config_entry_id}"
+        )
+    return runtime
 
 
 async def _async_check_camera_access(
@@ -173,21 +200,7 @@ async def _handle_send_message(
 ) -> ServiceResponse:
     """Handle one discord_assist.send_message call."""
     data = call.data
-    config_entry_id: str = data["config_entry_id"]
-    entry = hass.config_entries.async_get_entry(config_entry_id)
-    if (
-        entry is None
-        or entry.domain != DOMAIN
-        or entry.state is not ConfigEntryState.LOADED
-    ):
-        raise ServiceValidationError(
-            f"Discord Assist config entry is not loaded: {config_entry_id}"
-        )
-    client = getattr(getattr(entry, "runtime_data", None), "client", None)
-    if client is None:
-        raise ServiceValidationError(
-            f"Discord Assist config entry is not loaded: {config_entry_id}"
-        )
+    client = _loaded_runtime(hass, data["config_entry_id"]).client
 
     message: str = data["message"]
     image: str | None = data.get("image")
@@ -225,6 +238,29 @@ async def _handle_send_message(
     }
 
 
+async def _handle_retire_message(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Strip a tracked button message of its buttons, with an outcome."""
+    runtime = _loaded_runtime(hass, call.data["config_entry_id"])
+    store = getattr(runtime, "button_store", None)
+    where = (call.data["channel_id"], call.data["message_id"])
+    if store is None:
+        raise ServiceValidationError("This entry tracks no button messages")
+    records = await store.async_remove_where(
+        lambda record: (record.channel_id, record.message_id) == where
+    )
+    if not records:
+        raise ServiceValidationError(
+            "No button message with that channel and message id is being "
+            "tracked for this entry"
+        )
+    if not await async_edit_retired(
+        runtime.client, records[0], call.data.get("outcome")
+    ):
+        raise ServiceValidationError(
+            "The tracked Discord message could not be found to retire it"
+        )
+
+
 def async_register_services(hass: HomeAssistant) -> None:
     """Register the integration's actions (once, from async_setup)."""
 
@@ -237,4 +273,11 @@ def async_register_services(hass: HomeAssistant) -> None:
         _send,
         schema=SEND_MESSAGE_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
+    )
+
+    async def _retire(call: ServiceCall) -> None:
+        await _handle_retire_message(hass, call)
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_RETIRE_MESSAGE, _retire, schema=RETIRE_MESSAGE_SCHEMA
     )

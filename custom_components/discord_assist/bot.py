@@ -509,7 +509,9 @@ class DiscordAssistClient(discord.Client):
             else ButtonOutcome(outcome=result, ephemeral=result)
         )
         if outcome.retire and not taken.multi_use:
-            await self._retire_interaction_message(interaction, outcome.outcome)
+            await self._retire_interaction_message(
+                interaction, outcome.outcome, taken.payload.get("headline")
+            )
         if outcome.ephemeral:
             await self._respond_interaction(interaction, outcome.ephemeral)
 
@@ -546,7 +548,10 @@ class DiscordAssistClient(discord.Client):
             _LOGGER.warning("Failed to reply to interaction", exc_info=True)
 
     async def _retire_interaction_message(
-        self, interaction: discord.Interaction, outcome: str | None
+        self,
+        interaction: discord.Interaction,
+        outcome: str | None,
+        headline: str | None = None,
     ) -> None:
         """Drop the message's buttons and append the outcome line.
 
@@ -557,7 +562,9 @@ class DiscordAssistClient(discord.Client):
             message = getattr(interaction, "message", None)
             if message is not None and hasattr(message, "edit"):
                 await message.edit(
-                    content=retired_content(getattr(message, "content", None), outcome),
+                    content=retired_content(
+                        getattr(message, "content", None), outcome, headline
+                    ),
                     view=None,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )

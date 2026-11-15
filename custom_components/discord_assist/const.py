@@ -70,6 +70,7 @@ LOCAL_AGENT_ID = "conversation.home_assistant"
 RECONNECT_DELAY = 60
 
 SERVICE_SEND_MESSAGE = "send_message"
+SERVICE_RETIRE_MESSAGE = "retire_message"
 
 ISSUE_NO_AUTHORIZED_USERS = "no_authorized_users"
 ISSUE_MESSAGE_CONTENT_INTENT = "message_content_intent"

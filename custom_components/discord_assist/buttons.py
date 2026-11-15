@@ -199,6 +199,9 @@ class ButtonStore:
         self._ttl = float(ttl_seconds)
         self._now = now
         self._records: dict[str, ButtonRecord] = {}
+        # Expired records whose message still shows buttons, waiting for the
+        # retire pass (retire.py) to strip them.
+        self._expired: dict[str, ButtonRecord] = {}
         self._loaded = False
         self._lock = asyncio.Lock()
 
@@ -212,32 +215,72 @@ class ButtonStore:
             return
         self._loaded = True
         data = await self._store.async_load()
-        records: dict[str, ButtonRecord] = {}
-        if isinstance(data, Mapping):
-            raw = data.get("records")
-            if isinstance(raw, Mapping):
-                for value in raw.values():
-                    if isinstance(value, Mapping):
-                        record = ButtonRecord.from_dict(value)
-                        if record is not None:
-                            records[record.record_id] = record
-        self._records = records
+        self._records = self._parse(data, "records")
+        self._expired = self._parse(data, "expired")
         if self._prune_locked():
             await self._save_locked()
 
+    @staticmethod
+    def _parse(data: Any, key: str) -> dict[str, ButtonRecord]:
+        records: dict[str, ButtonRecord] = {}
+        raw = data.get(key) if isinstance(data, Mapping) else None
+        if isinstance(raw, Mapping):
+            for value in raw.values():
+                if isinstance(value, Mapping):
+                    record = ButtonRecord.from_dict(value)
+                    if record is not None:
+                        records[record.record_id] = record
+        return records
+
     def _prune_locked(self) -> bool:
-        """Drop expired records; return True if anything was dropped."""
+        """Move expired records out; return True if anything changed.
+
+        An expired record whose message is known is handed to the retire
+        pass (its buttons are still on screen); one with no message is
+        simply dropped.
+        """
         now = self._now()
         expired = [key for key, rec in self._records.items() if rec.is_expired(now)]
         for key in expired:
-            del self._records[key]
+            record = self._records.pop(key)
+            if record.message_id is not None and record.channel_id is not None:
+                self._expired[key] = record
         return bool(expired)
 
     async def _save_locked(self) -> None:
         self._prune_locked()
         await self._store.async_save(
-            {"records": {key: rec.to_dict() for key, rec in self._records.items()}}
+            {
+                "records": {key: rec.to_dict() for key, rec in self._records.items()},
+                "expired": {key: rec.to_dict() for key, rec in self._expired.items()},
+            }
         )
+
+    async def async_pop_expired(self, limit: int) -> list[ButtonRecord]:
+        """Up to ``limit`` expired messages to retire, one record per message.
+
+        Every record of a returned message leaves the store, so a message
+        is retired once even when it carried several buttons.
+        """
+        async with self._lock:
+            await self._load_locked()
+            changed = self._prune_locked()
+            picked: dict[tuple[int | None, int | None], ButtonRecord] = {}
+            for record in self._expired.values():
+                where = (record.channel_id, record.message_id)
+                if where not in picked and len(picked) < limit:
+                    picked[where] = record
+            if picked:
+                for key in [
+                    key
+                    for key, rec in self._expired.items()
+                    if (rec.channel_id, rec.message_id) in picked
+                ]:
+                    del self._expired[key]
+                changed = True
+            if changed:
+                await self._save_locked()
+            return list(picked.values())
 
     async def record(
         self,
@@ -350,6 +393,10 @@ class ButtonStore:
             removed = [rec for rec in self._records.values() if predicate(rec)]
             for rec in removed:
                 del self._records[rec.record_id]
+            stale = [rec for rec in self._expired.values() if predicate(rec)]
+            for rec in stale:
+                del self._expired[rec.record_id]
+            removed.extend(stale)
             if removed:
                 await self._save_locked()
             return removed
@@ -358,6 +405,7 @@ class ButtonStore:
         """Delete the persisted records (the config entry was removed)."""
         async with self._lock:
             self._records = {}
+            self._expired = {}
             remove = getattr(self._store, "async_remove", None)
             if callable(remove):
                 await remove()
@@ -387,12 +435,33 @@ class ButtonSpec:
     multi_use: bool = False
 
 
-def retired_content(content: str | None, outcome: str | None) -> str | None:
-    """The message text after a press: the original plus the outcome line."""
-    if not outcome:
-        return content
-    base = content or ""
-    return f"{base}\n{outcome}" if base else outcome
+def headline_of(text: str) -> str | None:
+    """The first non-empty line of a message, struck through when retired."""
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()[:200]
+    return None
+
+
+def retired_content(
+    current: str | None, outcome: str | None, headline: str | None = None
+) -> str:
+    """The message text once its buttons are retired.
+
+    The headline is struck through where it appears (or prepended, struck,
+    when the live text no longer contains it) and the outcome line is
+    appended, for example "Andrew pressed Unlock front door".
+    """
+    content = current or ""
+    if headline:
+        struck = f"~~{headline}~~"
+        if headline in content and struck not in content:
+            content = content.replace(headline, struck, 1)
+        elif struck not in content:
+            content = f"{struck}\n{content}" if content else struck
+    if outcome and outcome not in content:
+        content = f"{content}\n{outcome}" if content else outcome
+    return content
 
 
 async def async_send_with_buttons(
@@ -419,10 +488,11 @@ async def async_send_with_buttons(
     from .text_utils import chunk_message
 
     group_id = secrets.token_urlsafe(6)
+    headline = headline_of(text)
     records = [
         await store.record(
             spec.action,
-            payload=spec.payload,
+            payload={**spec.payload, "headline": headline},
             allowed_user_ids=spec.allowed_user_ids,
             ttl_seconds=ttl_seconds,
             group_id=group_id,
