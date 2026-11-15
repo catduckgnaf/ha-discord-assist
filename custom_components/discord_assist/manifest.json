@@ -1,6 +1,7 @@
 {
   "domain": "discord_assist",
   "name": "Discord Assist",
+  "after_dependencies": ["logbook"],
   "categories": [
     "ai_voice.voice_assistants",
     "messaging_notifications.chat_apps"
@@ -8,7 +9,6 @@
   "codeowners": ["@catduckgnaf"],
   "config_flow": true,
   "dependencies": ["conversation"],
-  "after_dependencies": ["logbook"],
   "documentation": "https://github.com/catduckgnaf/ha-discord-assist",
   "integration_type": "service",
   "iot_class": "cloud_push",
