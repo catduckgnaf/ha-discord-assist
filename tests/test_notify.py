@@ -208,6 +208,13 @@ def _fake_client(**overrides):
     # Empty channel cache: entity names fall back to the channel id.
     client.get_channel = MagicMock(return_value=None)
     client.guilds = []
+    # REST lookup fails by default: names fall back to the channel id.
+    client.fetch_channel = AsyncMock(side_effect=RuntimeError("no REST in tests"))
+
+    async def send_to_channel(channel, content, **kwargs):
+        return await channel.send(content, **kwargs)
+
+    client.send_to_channel = AsyncMock(side_effect=send_to_channel)
     for name, value in overrides.items():
         setattr(client, name, value)
     return client
@@ -276,8 +283,28 @@ async def test_options_change_adds_and_removes_entities(hass: HomeAssistant):
     assert "notify.mock_title_111" in live_ids
     assert "notify.mock_title_333" in live_ids
     assert "notify.mock_title_222" not in live_ids
-    removed = hass.states.get("notify.mock_title_222")
-    assert removed is None or removed.attributes.get("restored") is True
+    # The registry entry for the removed channel is gone too, so no
+    # "no longer provided" entity is left behind.
+    from homeassistant.helpers import entity_registry as er
+
+    assert er.async_get(hass).async_get("notify.mock_title_222") is None
+    assert hass.states.get("notify.mock_title_222") is None
+
+
+async def test_first_registration_uses_rest_channel_name(hass: HomeAssistant):
+    """The cache is empty at platform setup; the name comes over REST."""
+    entry = _ha_entry([111])
+    entry.add_to_hass(hass)
+    fake_client = _fake_client(
+        fetch_channel=AsyncMock(return_value=_StubChannel(111, "alerts"))
+    )
+
+    with patch(CLIENT, return_value=fake_client):
+        assert await hass.config_entries.async_setup(entry.entry_id) is True
+        await hass.async_block_till_done()
+
+    assert hass.states.get("notify.mock_title_alerts") is not None
+    assert hass.states.get("notify.mock_title_111") is None
 
 
 async def test_notify_service_posts_to_channel(hass: HomeAssistant):

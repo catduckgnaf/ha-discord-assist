@@ -9,6 +9,7 @@ import discord
 from homeassistant.components.notify import NotifyEntity, NotifyEntityFeature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -77,10 +78,62 @@ async def async_setup_entry(
     entities for added channels are created and entities for removed
     channels disappear with the unload.
     """
+    client = entry.runtime_data.client
     channels = sorted(entry.runtime_data.router.channels)
+    _remove_stale_entities(hass, entry, set(channels))
+    names = {
+        channel_id: await _fetch_channel_name(client, channel_id)
+        for channel_id in channels
+    }
     async_add_entities(
-        [DiscordChannelNotifyEntity(entry, channel_id) for channel_id in channels]
+        [
+            DiscordChannelNotifyEntity(entry, channel_id, names[channel_id])
+            for channel_id in channels
+        ]
     )
+
+
+def _unique_id(entry: DiscordConfigEntry, channel_id: int) -> str:
+    return f"{entry.unique_id}_notify_{channel_id}"
+
+
+def _remove_stale_entities(
+    hass: HomeAssistant, entry: DiscordConfigEntry, channels: set[int]
+) -> None:
+    """Drop registry entries for channels no longer in the options."""
+    registry = er.async_get(hass)
+    wanted = {_unique_id(entry, channel_id) for channel_id in channels}
+    prefix = f"{entry.unique_id}_notify_"
+    for reg_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if (
+            reg_entry.domain == "notify"
+            and reg_entry.unique_id.startswith(prefix)
+            and reg_entry.unique_id not in wanted
+        ):
+            registry.async_remove(reg_entry.entity_id)
+
+
+async def _fetch_channel_name(client: Any, channel_id: int) -> str:
+    """Channel name for the first registration, over REST if needed.
+
+    Platforms are set up before the gateway has filled the channel cache,
+    and the first name decides the entity_id, so ask Discord directly (the
+    client is already logged in) instead of registering the numeric id.
+    """
+    name = _channel_name(client, channel_id)
+    if name != str(channel_id):
+        return name
+    fetch = getattr(client, "fetch_channel", None)
+    if callable(fetch):
+        try:
+            channel = await fetch(channel_id)
+        except Exception:  # noqa: BLE001 - unknown channel: fall back to the id
+            _LOGGER.debug("Could not fetch Discord channel %s", channel_id)
+        else:
+            fetched = getattr(channel, "name", None)
+            if isinstance(fetched, str) and fetched:
+                return fetched
+    return name
 
 
 class DiscordChannelNotifyEntity(NotifyEntity):
@@ -90,12 +143,14 @@ class DiscordChannelNotifyEntity(NotifyEntity):
     _attr_supported_features = NotifyEntityFeature.TITLE
     _attr_should_poll = False
 
-    def __init__(self, entry: DiscordConfigEntry, channel_id: int) -> None:
+    def __init__(
+        self, entry: DiscordConfigEntry, channel_id: int, name: str | None = None
+    ) -> None:
         self._client = entry.runtime_data.client
         self._channel_id = channel_id
         self._signal = signal_connection(entry.entry_id)
-        self._attr_unique_id = f"{entry.unique_id}_notify_{channel_id}"
-        self._attr_name = _channel_name(self._client, channel_id)
+        self._attr_unique_id = _unique_id(entry, channel_id)
+        self._attr_name = name or _channel_name(self._client, channel_id)
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, str(entry.unique_id))},
             name=entry.title,
@@ -122,7 +177,9 @@ class DiscordChannelNotifyEntity(NotifyEntity):
     def _connection_changed(self) -> None:
         # The channel cache fills in once the gateway connects, so a name
         # that fell back to the channel id at setup can resolve lazily here.
-        self._attr_name = _channel_name(self._client, self._channel_id)
+        name = _channel_name(self._client, self._channel_id)
+        if name != str(self._channel_id):
+            self._attr_name = name
         self.async_write_ha_state()
 
     async def async_send_message(self, message: str, title: str | None = None) -> None:
@@ -146,9 +203,17 @@ class DiscordChannelNotifyEntity(NotifyEntity):
                 f"Discord channel {self._channel_id} is not available; "
                 "the bot is disconnected or cannot see that channel"
             )
+        # Through the client's recording send path, so the duplicate-token
+        # check knows these bot-authored messages are ours.
+        send_recorded = getattr(self._client, "send_to_channel", None)
         for part in chunk_message(text):
             try:
-                await send(part, allowed_mentions=discord.AllowedMentions.none())
+                if callable(send_recorded):
+                    await send_recorded(
+                        channel, part, allowed_mentions=discord.AllowedMentions.none()
+                    )
+                else:
+                    await send(part, allowed_mentions=discord.AllowedMentions.none())
             except discord.HTTPException as err:
                 _LOGGER.warning(
                     "Failed to send notification to channel %s: %s",
