@@ -15,6 +15,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import issue_registry as ir
 
 from .bot import DiscordAssistClient
+from .buttons import ButtonStore
 from .const import (
     CONF_TOKEN,
     DOMAIN,
@@ -70,7 +71,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
     _set_issue(hass, entry, ISSUE_NO_AUTHORIZED_USERS, not router.has_authorized_users)
     _set_issue(hass, entry, ISSUE_MESSAGE_CONTENT_INTENT, False)
 
-    client = DiscordAssistClient(hass, router, signal_connection(entry.entry_id))
+    client = DiscordAssistClient(
+        hass,
+        router,
+        signal_connection(entry.entry_id),
+        button_store=ButtonStore(
+            hass, storage_key=f"{DOMAIN}.buttons.{entry.entry_id}"
+        ),
+    )
     # Log in over REST first so a dead network or bad token surfaces here,
     # where Home Assistant retries with backoff or starts reauth.
     try:

@@ -21,6 +21,7 @@ from .const import (
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
     CONF_CHANNELS,
+    CONF_CLARIFY_BUTTONS_HEURISTIC,
     CONF_FALLBACK_USER,
     CONF_IDLE_MINUTES,
     CONF_LANGUAGE,
@@ -31,6 +32,7 @@ from .const import (
     CONF_SPEAKER_CONTEXT,
     CONF_USER_MAP,
     DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_CLARIFY_BUTTONS_HEURISTIC,
     DEFAULT_IDLE_MINUTES,
     DEFAULT_PREFER_LOCAL,
     DEFAULT_RESPOND_DMS,
@@ -111,6 +113,23 @@ def _speech(result: ConversationResult) -> str:
     return (speech.get("plain") or {}).get("speech") or ""
 
 
+@dataclass(frozen=True)
+class DetailedReply:
+    """A reply plus the conversation signals ``process()`` used to drop."""
+
+    speech: str
+    continue_conversation: bool = False
+    conversation_id: str | None = None
+
+
+def _details(result: ConversationResult) -> DetailedReply:
+    return DetailedReply(
+        speech=_speech(result),
+        continue_conversation=bool(getattr(result, "continue_conversation", False)),
+        conversation_id=getattr(result, "conversation_id", None),
+    )
+
+
 def _local_needs_fallback(result: ConversationResult) -> bool:
     response = result.response
     return (
@@ -137,6 +156,7 @@ class ConversationRouter:
     speaker_context: bool = DEFAULT_SPEAKER_CONTEXT
     prefer_local: bool = DEFAULT_PREFER_LOCAL
     agent_timeout: float = DEFAULT_AGENT_TIMEOUT
+    clarify_buttons_heuristic: bool = DEFAULT_CLARIFY_BUTTONS_HEURISTIC
     turns: TurnLocks = field(default_factory=TurnLocks)
 
     @property
@@ -196,6 +216,29 @@ class ConversationRouter:
         conversation_key: str,
         where: MessageContext | None = None,
     ) -> str:
+        """Run one turn and return only its speech (the original contract)."""
+        detailed = await self.process_detailed(
+            text=text,
+            discord_user_id=discord_user_id,
+            conversation_key=conversation_key,
+            where=where,
+        )
+        return detailed.speech
+
+    async def process_detailed(
+        self,
+        *,
+        text: str,
+        discord_user_id: int,
+        conversation_key: str,
+        where: MessageContext | None = None,
+    ) -> DetailedReply:
+        """Run one turn, keeping ``ConversationResult.continue_conversation``.
+
+        Same authorization, turn lock and timeout as ``process()``; the
+        extra signal lets the bot offer Yes / No buttons when the agent
+        expects a follow-up.
+        """
         ha_user_id = self.ha_user_for(discord_user_id)
         if ha_user_id is None:
             raise PermissionError(f"Discord user {discord_user_id} is not authorized")
@@ -219,7 +262,7 @@ class ConversationRouter:
         context: Context,
         device_id: str | None,
         where: MessageContext,
-    ) -> str:
+    ) -> DetailedReply:
         if self.prefer_local and self.agent_id != LOCAL_AGENT_ID:
             # No conversation_id: the local agent is stateless here, and the
             # LLM's history is left alone.
@@ -233,7 +276,7 @@ class ConversationRouter:
                 device_id=device_id,
             )
             if not _local_needs_fallback(local):
-                return _speech(local)
+                return _details(local)
 
         extra = (
             await self._speaker_prompt(context.user_id, device_id, where)
@@ -251,7 +294,7 @@ class ConversationRouter:
             extra_system_prompt=extra,
         )
         self.cache.set(conversation_key, result.conversation_id)
-        return _speech(result)
+        return _details(result)
 
     async def _speaker_prompt(
         self, ha_user_id: str | None, device_id: str | None, where: MessageContext
@@ -307,4 +350,10 @@ class ConversationRouter:
             speaker_context=opts.get(CONF_SPEAKER_CONTEXT, DEFAULT_SPEAKER_CONTEXT),
             prefer_local=opts.get(CONF_PREFER_LOCAL, DEFAULT_PREFER_LOCAL),
             agent_timeout=float(opts.get(CONF_AGENT_TIMEOUT, DEFAULT_AGENT_TIMEOUT)),
+            clarify_buttons_heuristic=bool(
+                opts.get(
+                    CONF_CLARIFY_BUTTONS_HEURISTIC,
+                    DEFAULT_CLARIFY_BUTTONS_HEURISTIC,
+                )
+            ),
         )
