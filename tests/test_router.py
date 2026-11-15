@@ -11,9 +11,12 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.discord_assist.const import (
     CONF_AGENT_ID,
+    CONF_AGENT_MAP_CHANNEL,
+    CONF_AGENT_MAP_USER,
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
     CONF_CONVERSATION_SCOPE,
+    CONF_EVENT_EXCLUDE_TEXT,
     CONF_PREFER_LOCAL,
     CONF_ROOM_MAP,
     CONF_USER_MAP,
@@ -84,17 +87,25 @@ def test_make_conversation_key_user_scope():
 
 
 def test_router_conversation_key_uses_scope():
+    agent = ":agent:conversation.ollama"
     default = _router()
     assert (
-        default.conversation_key(is_dm=False, channel_id=5, author_id=9) == "channel:5"
+        default.conversation_key(is_dm=False, channel_id=5, author_id=9)
+        == "channel:5" + agent
     )
-    assert default.conversation_key(is_dm=True, channel_id=5, author_id=9) == "dm:9"
+    assert (
+        default.conversation_key(is_dm=True, channel_id=5, author_id=9)
+        == "dm:9" + agent
+    )
     per_user = _router(conversation_scope=CONVERSATION_SCOPE_USER)
     assert (
         per_user.conversation_key(is_dm=False, channel_id=5, author_id=9)
-        == "channel:5:user:9"
+        == "channel:5:user:9" + agent
     )
-    assert per_user.conversation_key(is_dm=True, channel_id=5, author_id=9) == "dm:9"
+    assert (
+        per_user.conversation_key(is_dm=True, channel_id=5, author_id=9)
+        == "dm:9" + agent
+    )
 
 
 async def _echo_converse(hass, text, conversation_id, context, **kwargs):
@@ -141,6 +152,153 @@ async def test_process_channel_scope_shares_conversation_id():
     # The second speaker continues the first speaker's conversation.
     seen = [call.args[2] for call in converse.call_args_list]
     assert seen == [None, "conv-ha-a"]
+
+
+def test_make_conversation_key_includes_agent():
+    """The agent segment keeps one agent's conversation_id from another's."""
+    dm = make_conversation_key(
+        is_dm=True, channel_id=5, author_id=9, agent_id="conversation.ollama"
+    )
+    channel = make_conversation_key(
+        is_dm=False, channel_id=5, author_id=9, agent_id="conversation.ollama"
+    )
+    other = make_conversation_key(
+        is_dm=False, channel_id=5, author_id=9, agent_id=LOCAL_AGENT_ID
+    )
+    assert dm == "dm:9:agent:conversation.ollama"
+    assert channel == "channel:5:agent:conversation.ollama"
+    assert other == f"channel:5:agent:{LOCAL_AGENT_ID}"
+    assert channel != other
+
+
+def _agent_router(**overrides):
+    defaults = dict(
+        agent_map_user={7: "conversation.user-agent"},
+        agent_map_channel={111: "conversation.channel-agent"},
+    )
+    defaults.update(overrides)
+    return _router(**defaults)
+
+
+def test_agent_for_user_beats_channel_and_default():
+    router = _agent_router()
+    assert router.agent_for(7, 111, None) == "conversation.user-agent"
+    assert router.agent_for(7, 222, None) == "conversation.user-agent"
+
+
+def test_agent_for_channel_beats_default():
+    router = _agent_router()
+    assert router.agent_for(8, 111, None) == "conversation.channel-agent"
+
+
+def test_agent_for_default_when_no_override():
+    router = _agent_router()
+    assert router.agent_for(8, 222, None) == "conversation.ollama"
+    assert router.agent_for(8, None, None) == "conversation.ollama"
+
+
+def test_agent_for_thread_inherits_parent_channel():
+    router = _agent_router()
+    # Thread 999 lives in channel 111: it gets the parent channel's agent.
+    assert router.agent_for(8, 999, 111) == "conversation.channel-agent"
+    # A user override still wins inside a thread.
+    assert router.agent_for(7, 999, 111) == "conversation.user-agent"
+    # A thread in an unmapped channel falls back to the entry default.
+    assert router.agent_for(8, 999, 222) == "conversation.ollama"
+
+
+async def test_process_uses_resolved_agent():
+    router = _agent_router(user_map={7: "ha-a", 8: "ha-b"})
+    with patch(_CONVERSE, new=AsyncMock(return_value=_result())) as conv:
+        await router.process(
+            text="hi",
+            discord_user_id=8,
+            conversation_key="channel:111",
+            where=MessageContext(channel_id=111),
+        )
+        await router.process(
+            text="hi",
+            discord_user_id=7,
+            conversation_key="channel:111",
+            where=MessageContext(channel_id=111),
+        )
+    assert conv.call_args_list[0].kwargs["agent_id"] == "conversation.channel-agent"
+    assert conv.call_args_list[1].kwargs["agent_id"] == "conversation.user-agent"
+
+
+async def test_cache_separates_agents_in_same_channel():
+    """Switching agents never passes one agent's conversation_id to another."""
+    router = _router(
+        user_map={7: "ha-a", 8: "ha-b"},
+        agent_map_user={8: "conversation.other"},
+    )
+
+    def by_agent(*args, **kwargs):
+        return _result(conversation_id=f"conv-for-{kwargs['agent_id']}")
+
+    keys = {}
+    with patch(_CONVERSE, new=AsyncMock(side_effect=by_agent)) as conv:
+        for uid in (7, 8):
+            agent = router.agent_for(uid, 111, None)
+            keys[uid] = make_conversation_key(
+                is_dm=False, channel_id=111, author_id=uid, agent_id=agent
+            )
+            await router.process(
+                text="hi",
+                discord_user_id=uid,
+                conversation_key=keys[uid],
+                where=MessageContext(channel_id=111),
+            )
+        assert keys[7] != keys[8]
+        assert router.cache.get(keys[7]) == "conv-for-conversation.ollama"
+        assert router.cache.get(keys[8]) == "conv-for-conversation.other"
+        # A second turn for user 7 resumes its own agent's conversation,
+        # never the other agent's id (async_converse arg 2 is the id passed).
+        await router.process(
+            text="again",
+            discord_user_id=7,
+            conversation_key=keys[7],
+            where=MessageContext(channel_id=111),
+        )
+    assert conv.call_args_list[-1].args[2] == "conv-for-conversation.ollama"
+
+
+async def test_prefer_local_applies_on_top_of_channel_agent():
+    """Local is tried first; a miss falls back to the resolved agent."""
+    router = _router(
+        user_map={7: "ha-a"},
+        prefer_local=True,
+        agent_map_channel={111: "conversation.channel-agent"},
+    )
+    local = _result(
+        "Sorry",
+        response_type=IntentResponseType.ERROR,
+        error_code=IntentResponseErrorCode.NO_INTENT_MATCH,
+    )
+    resolved = _result("Done by channel agent", conversation_id="chan-1")
+    with patch(_CONVERSE, new=AsyncMock(side_effect=[local, resolved])) as conv:
+        reply = await router.process(
+            text="make it cozy",
+            discord_user_id=7,
+            conversation_key="channel:111",
+            where=MessageContext(channel_id=111),
+        )
+    assert reply == "Done by channel agent"
+    assert conv.call_args_list[0].kwargs["agent_id"] == LOCAL_AGENT_ID
+    assert conv.call_args_list[1].kwargs["agent_id"] == "conversation.channel-agent"
+
+
+async def test_prefer_local_skipped_when_resolved_agent_is_local():
+    """A user override to the local agent is not tried twice."""
+    router = _router(
+        user_map={7: "ha-a"},
+        prefer_local=True,
+        agent_map_user={7: LOCAL_AGENT_ID},
+    )
+    with patch(_CONVERSE, new=AsyncMock(return_value=_result())) as conv:
+        await router.process(text="hi", discord_user_id=7, conversation_key="dm:7")
+    assert conv.await_count == 1
+    assert conv.call_args.kwargs["agent_id"] == LOCAL_AGENT_ID
 
 
 @pytest.mark.parametrize(
@@ -480,3 +638,65 @@ def test_from_entry_conversation_scope():
         SimpleNamespace(options={**base, CONF_CONVERSATION_SCOPE: "bogus"}),
     )
     assert bogus.conversation_scope == "channel"
+
+
+def test_from_entry_reads_agent_maps():
+    """Agent maps coerce string keys to ints and drop non-numeric keys."""
+    entry = SimpleNamespace(
+        options={
+            CONF_AGENT_ID: "conversation.ollama",
+            CONF_AGENT_MAP_USER: {"7": "conversation.user-agent", "bad": "x"},
+            CONF_AGENT_MAP_CHANNEL: {"111": "conversation.channel-agent", "no": "y"},
+        }
+    )
+    router = ConversationRouter.from_entry(object(), entry)
+    assert router.agent_map_user == {7: "conversation.user-agent"}
+    assert router.agent_map_channel == {111: "conversation.channel-agent"}
+    assert router.agent_for(7, 111, None) == "conversation.user-agent"
+    assert router.agent_for(8, 111, None) == "conversation.channel-agent"
+    assert router.agent_for(8, 222, None) == "conversation.ollama"
+
+
+def test_from_entry_agent_maps_default_empty():
+    entry = SimpleNamespace(options={CONF_AGENT_ID: "conversation.ollama"})
+    router = ConversationRouter.from_entry(object(), entry)
+    assert router.agent_map_user == {}
+    assert router.agent_map_channel == {}
+
+
+def test_from_entry_reads_event_options_and_entry_id():
+    entry = SimpleNamespace(
+        entry_id="entry-abc",
+        options={
+            CONF_AGENT_ID: "conversation.ollama",
+            CONF_EVENT_EXCLUDE_TEXT: True,
+        },
+    )
+    router = ConversationRouter.from_entry(object(), entry)
+    assert router.config_entry_id == "entry-abc"
+    assert router.event_exclude_text is True
+
+
+def test_from_entry_event_defaults():
+    entry = SimpleNamespace(options={CONF_AGENT_ID: "conversation.ollama"})
+    router = ConversationRouter.from_entry(object(), entry)
+    assert router.config_entry_id is None
+    assert router.event_exclude_text is False
+
+
+def test_conversation_key_carries_resolved_agent():
+    entry = SimpleNamespace(
+        options={
+            CONF_AGENT_ID: "conversation.ollama",
+            CONF_AGENT_MAP_CHANNEL: {"111": "conversation.channel-agent"},
+        }
+    )
+    router = ConversationRouter.from_entry(object(), entry)
+    assert (
+        router.conversation_key(is_dm=False, channel_id=222, author_id=7, parent_id=111)
+        == "channel:222:agent:conversation.channel-agent"
+    )
+    assert (
+        router.conversation_key(is_dm=True, channel_id=5, author_id=7)
+        == "dm:7:agent:conversation.ollama"
+    )

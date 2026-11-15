@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import aiohttp
 import discord
@@ -16,15 +16,20 @@ from homeassistant.helpers import issue_registry as ir
 
 from .bot import DiscordAssistClient
 from .const import (
+    CONF_PLACEHOLDER_DELAY,
     CONF_TOKEN,
+    DEFAULT_PLACEHOLDER_DELAY,
     DOMAIN,
+    ISSUE_DUPLICATE_TOKEN,
     ISSUE_MESSAGE_CONTENT_INTENT,
     ISSUE_NO_AUTHORIZED_USERS,
+    LEGACY_DOMAIN,
     RECONNECT_DELAY,
     issue_id,
     signal_connection,
 )
 from .conversation_router import ConversationRouter
+from .recent_errors import RecentErrors
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +42,7 @@ class RuntimeData:
 
     client: DiscordAssistClient
     router: ConversationRouter
+    recent_errors: RecentErrors = field(default_factory=RecentErrors)
 
 
 type DiscordConfigEntry = ConfigEntry[RuntimeData]
@@ -58,6 +64,23 @@ def _set_issue(hass: HomeAssistant, entry: ConfigEntry, kind: str, active: bool)
         ir.async_delete_issue(hass, DOMAIN, issue_id(kind, entry.entry_id))
 
 
+def _legacy_entry_uses_same_token(hass: HomeAssistant, token: str) -> bool:
+    """Whether an enabled legacy entry is loaded with the same bot token.
+
+    Home Assistant loads every enabled config entry at startup, so an
+    enabled Discord Conversation entry with this token will run the same
+    bot in a second process. A disabled entry (for example the one left
+    behind by the import flow in the config flow) is not running and
+    does not count.
+    """
+    for legacy in hass.config_entries.async_entries(LEGACY_DOMAIN):
+        if getattr(legacy, "disabled_by", None) is not None:
+            continue
+        if legacy.data.get(CONF_TOKEN) == token:
+            return True
+    return False
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> bool:
     """Set up Discord Assist from a config entry."""
     router = ConversationRouter.from_entry(hass, entry)
@@ -69,8 +92,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         )
     _set_issue(hass, entry, ISSUE_NO_AUTHORIZED_USERS, not router.has_authorized_users)
     _set_issue(hass, entry, ISSUE_MESSAGE_CONTENT_INTENT, False)
+    _set_issue(
+        hass,
+        entry,
+        ISSUE_DUPLICATE_TOKEN,
+        _legacy_entry_uses_same_token(hass, entry.data.get(CONF_TOKEN, "")),
+    )
 
-    client = DiscordAssistClient(hass, router, signal_connection(entry.entry_id))
+    recent_errors = RecentErrors()
+    client = DiscordAssistClient(
+        hass,
+        router,
+        signal_connection(entry.entry_id),
+        placeholder_delay=float(
+            entry.options.get(CONF_PLACEHOLDER_DELAY, DEFAULT_PLACEHOLDER_DELAY)
+        ),
+        recent_errors=recent_errors,
+        entry_title=entry.title,
+    )
     # Log in over REST first so a dead network or bad token surfaces here,
     # where Home Assistant retries with backoff or starts reauth.
     try:
@@ -82,19 +121,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         await client.close()
         raise ConfigEntryNotReady(f"Could not reach Discord: {err}") from err
 
-    entry.runtime_data = RuntimeData(client=client, router=router)
+    entry.runtime_data = RuntimeData(
+        client=client, router=router, recent_errors=recent_errors
+    )
 
     async def _run() -> None:
         try:
             await client.connect(reconnect=True)
-        except discord.PrivilegedIntentsRequired:
+        except discord.PrivilegedIntentsRequired as err:
+            recent_errors.record(err, source="gateway")
             _LOGGER.error(
                 "Discord refused the Message Content intent; enable it for the "
                 "bot in the Discord Developer Portal, then reload the entry"
             )
             _set_issue(hass, entry, ISSUE_MESSAGE_CONTENT_INTENT, True)
             return
-        except Exception:  # noqa: BLE001
+        except Exception as err:  # noqa: BLE001
+            recent_errors.record(err, source="gateway")
             _LOGGER.exception("Discord gateway task failed")
         if client.is_closed():
             return
@@ -124,5 +167,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Clean up repair issues when the entry is deleted."""
-    for kind in (ISSUE_NO_AUTHORIZED_USERS, ISSUE_MESSAGE_CONTENT_INTENT):
+    for kind in (
+        ISSUE_NO_AUTHORIZED_USERS,
+        ISSUE_MESSAGE_CONTENT_INTENT,
+        ISSUE_DUPLICATE_TOKEN,
+    ):
         ir.async_delete_issue(hass, DOMAIN, issue_id(kind, entry.entry_id))
