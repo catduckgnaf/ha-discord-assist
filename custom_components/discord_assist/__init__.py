@@ -151,7 +151,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         await async_prune_expired(button_store, client)
 
     entry.async_on_unload(
-        async_track_time_interval(hass, _prune_expired, PRUNE_INTERVAL)
+        async_track_time_interval(
+            hass, _prune_expired, PRUNE_INTERVAL, cancel_on_shutdown=True
+        )
     )
     _async_register_retire_service(hass)
 
