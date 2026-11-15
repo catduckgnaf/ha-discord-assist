@@ -8,6 +8,27 @@ LEGACY_DOMAIN = "discord_conversation"
 # Entry data (secret / identity)
 CONF_TOKEN = "token"
 CONF_BOT_ID = "bot_id"
+CONF_AGENT_API_KEY = "agent_api_key"
+
+# Bundled conversation agent options (entry options; the API key itself is
+# secret and lives in entry data under CONF_AGENT_API_KEY)
+CONF_AGENT_BASE_URL = "agent_base_url"
+CONF_AGENT_MODEL = "agent_model"
+CONF_AGENT_MAX_TOKENS = "agent_max_tokens"
+CONF_AGENT_TEMPERATURE = "agent_temperature"
+CONF_AGENT_MAX_TOOL_CALLS = "agent_max_tool_calls"
+CONF_AGENT_LLM_APIS = "agent_llm_apis"
+CONF_AGENT_ALLOWED_TOOLS = "agent_allowed_tools"
+CONF_AGENT_OWNER_TOOLS = "agent_owner_tools"
+CONF_AGENT_OWNER_USERS = "agent_owner_users"
+CONF_AGENT_CONFIRM_TOOLS = "agent_confirm_tools"
+
+DEFAULT_AGENT_MAX_TOKENS = 1024
+DEFAULT_AGENT_TEMPERATURE = 0.7
+DEFAULT_AGENT_MAX_TOOL_CALLS = 10
+
+# Fired for every tool call the bundled agent's gate allows or refuses.
+EVENT_TOOL_CALL = "discord_assist_tool_call"
 
 # Entry options (editable)
 CONF_AGENT_ID = "agent_id"

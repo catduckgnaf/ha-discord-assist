@@ -15,6 +15,7 @@ from homeassistant.config_entries import (
     OptionsFlowWithReload,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import llm
 from homeassistant.helpers.selector import (
     BooleanSelector,
     DeviceSelector,
@@ -35,7 +36,18 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_AGENT_ALLOWED_TOOLS,
+    CONF_AGENT_API_KEY,
+    CONF_AGENT_BASE_URL,
+    CONF_AGENT_CONFIRM_TOOLS,
     CONF_AGENT_ID,
+    CONF_AGENT_LLM_APIS,
+    CONF_AGENT_MAX_TOKENS,
+    CONF_AGENT_MAX_TOOL_CALLS,
+    CONF_AGENT_MODEL,
+    CONF_AGENT_OWNER_TOOLS,
+    CONF_AGENT_OWNER_USERS,
+    CONF_AGENT_TEMPERATURE,
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
     CONF_BOT_ID,
@@ -50,6 +62,9 @@ from .const import (
     CONF_SPEAKER_CONTEXT,
     CONF_TOKEN,
     CONF_USER_MAP,
+    DEFAULT_AGENT_MAX_TOKENS,
+    DEFAULT_AGENT_MAX_TOOL_CALLS,
+    DEFAULT_AGENT_TEMPERATURE,
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_IDLE_MINUTES,
     DEFAULT_PREFER_LOCAL,
@@ -285,6 +300,7 @@ class DiscordAssistOptionsFlow(OptionsFlowWithReload):
             step_id="init",
             menu_options=[
                 "settings",
+                "agent",
                 "add_user_map",
                 "remove_user_map",
                 "add_room",
@@ -317,6 +333,101 @@ class DiscordAssistOptionsFlow(OptionsFlowWithReload):
             data_schema=self.add_suggested_values_to_schema(
                 schema, self.config_entry.options
             ),
+        )
+
+    async def async_step_agent(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Bundled agent: model endpoint, tool sources, and the tool gate.
+
+        The API key is a secret: it is stored in the entry's data, never in
+        its options, and the form never echoes it back. Leaving it blank
+        keeps the stored key.
+        """
+        if user_input is not None:
+            merged = dict(self.config_entry.options)
+            api_key = user_input.pop(CONF_AGENT_API_KEY, None)
+            if api_key:
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data={**self.config_entry.data, CONF_AGENT_API_KEY: api_key},
+                )
+            for key, value in user_input.items():
+                # An empty API list is meaningful (no tools at all), unlike
+                # the other fields where empty just clears the setting.
+                if key != CONF_AGENT_LLM_APIS and value in ("", []):
+                    merged.pop(key, None)
+                else:
+                    merged[key] = value
+            return self.async_create_entry(title="", data=merged)
+
+        api_options = [
+            SelectOptionDict(value=api.id, label=api.name)
+            for api in llm.async_get_apis(self.hass)
+        ]
+        user_options = await _ha_user_options(self.hass)
+
+        def _multi_custom() -> SelectSelector:
+            return SelectSelector(
+                SelectSelectorConfig(options=[], multiple=True, custom_value=True)
+            )
+
+        schema = vol.Schema(
+            {
+                vol.Optional(CONF_AGENT_BASE_URL, default=""): TextSelector(),
+                vol.Optional(CONF_AGENT_MODEL, default=""): TextSelector(),
+                vol.Optional(CONF_AGENT_API_KEY, default=""): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                ),
+                vol.Optional(
+                    CONF_AGENT_MAX_TOKENS, default=DEFAULT_AGENT_MAX_TOKENS
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=1, max=32768, step=1, mode=NumberSelectorMode.BOX
+                    )
+                ),
+                vol.Optional(
+                    CONF_AGENT_TEMPERATURE, default=DEFAULT_AGENT_TEMPERATURE
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0, max=2, step=0.1, mode=NumberSelectorMode.BOX
+                    )
+                ),
+                vol.Optional(
+                    CONF_AGENT_MAX_TOOL_CALLS, default=DEFAULT_AGENT_MAX_TOOL_CALLS
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0, max=25, step=1, mode=NumberSelectorMode.BOX
+                    )
+                ),
+                vol.Optional(CONF_AGENT_LLM_APIS, default=[]): SelectSelector(
+                    SelectSelectorConfig(
+                        options=api_options,
+                        multiple=True,
+                        custom_value=True,
+                        mode=SelectSelectorMode.LIST,
+                    )
+                ),
+                vol.Optional(CONF_AGENT_ALLOWED_TOOLS, default=[]): _multi_custom(),
+                vol.Optional(CONF_AGENT_OWNER_TOOLS, default=[]): _multi_custom(),
+                vol.Optional(CONF_AGENT_CONFIRM_TOOLS, default=[]): _multi_custom(),
+                vol.Optional(CONF_AGENT_OWNER_USERS, default=[]): SelectSelector(
+                    SelectSelectorConfig(
+                        options=user_options,
+                        multiple=True,
+                        mode=SelectSelectorMode.LIST,
+                    )
+                ),
+            }
+        )
+        suggested = dict(self.config_entry.options)
+        # Never suggest the stored API key back into the form.
+        suggested[CONF_AGENT_API_KEY] = ""
+        if CONF_AGENT_LLM_APIS not in suggested:
+            suggested[CONF_AGENT_LLM_APIS] = [llm.LLM_API_ASSIST]
+        return self.async_show_form(
+            step_id="agent",
+            data_schema=self.add_suggested_values_to_schema(schema, suggested),
         )
 
     async def async_step_add_user_map(

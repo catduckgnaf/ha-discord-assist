@@ -43,6 +43,7 @@ async def test_options_menu_shown(hass: HomeAssistant):
     assert result["type"] is FlowResultType.MENU
     assert set(result["menu_options"]) == {
         "settings",
+        "agent",
         "add_user_map",
         "remove_user_map",
         "add_room",
