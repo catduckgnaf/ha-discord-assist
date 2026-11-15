@@ -1,6 +1,10 @@
+<p align="center"><img src="custom_components/discord_assist/brand/icon@2x.png" alt="Discord Assist icon" width="128"></p>
+
 # Discord Assist
 
 Talk to Home Assistant's Assist from Discord.
+
+[![Open your Home Assistant instance and open this repository in the Marketplace.](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/marketplace_repository/?owner=catduckgnaf&repository=ha-discord-assist&category=integration)
 
 A Home Assistant custom integration that exposes the Assist conversation agent over a Discord bot. Users can send messages in configured channels or DMs, and the bot replies using whichever conversation agent you select (e.g. a local LLM, OpenAI, or the built-in Home Assistant Assist agent).
 
@@ -34,15 +38,19 @@ Requests never run without a Home Assistant user, so permissions always apply. U
 ### Prerequisites
 
 - Home Assistant 2026.6.0 or later
-- [HACS](https://hacs.xyz) installed
+- A Discord bot token (see [Discord setup](#discord-setup))
 
-### Install via HACS
+### Home Assistant 2026.11 and later (Marketplace)
 
-1. Open HACS in Home Assistant.
-2. Click the three-dot menu → **Custom repositories**.
-3. Add `https://github.com/catduckgnaf/ha-discord-assist` with category **Integration**.
-4. Find **Discord Assist** in the HACS integration list and install it.
-5. Restart Home Assistant.
+1. Click the **Open in Marketplace** badge above, or open the Marketplace in Home Assistant, open its menu, choose **Custom repositories**, and add `https://github.com/catduckgnaf/ha-discord-assist` as an **Integration**.
+2. Install **Discord Assist**.
+3. Restart Home Assistant.
+
+### Older versions (HACS)
+
+1. In HACS, open the menu and choose **Custom repositories**.
+2. Add `https://github.com/catduckgnaf/ha-discord-assist` with category **Integration**.
+3. Install **Discord Assist** and restart Home Assistant.
 
 ## Discord setup
 
@@ -64,7 +72,19 @@ Requests never run without a Home Assistant user, so permissions always apply. U
 
 ## Migrating from Discord Conversation
 
-If the Discord Conversation integration is already set up, adding Discord Assist offers **Import from Discord Conversation**. That copies the bot token and every setting, then disables (does not delete) the old entry so the bot is not driven twice. Once you are happy, remove Discord Conversation from HACS. Unmapped, non-allowlisted users who could use the old integration are ignored here.
+If the Discord Conversation integration is already set up, adding Discord Assist offers **Import from Discord Conversation**. That copies the bot token and every setting, then disables (does not delete) the old entry so the bot is not driven twice. Once you are happy, remove Discord Conversation from the Marketplace (or HACS). Unmapped, non-allowlisted users who could use the old integration are ignored here.
+
+## Getting good answers
+
+Discord Assist passes your message to the conversation agent you pick and posts its reply. Most "dumb" answers come from the agent's setup, not from Discord. If you use an LLM agent, check these first:
+
+- **Confirmation prompts.** Some prompt templates (including Extended OpenAI Conversation's default) tell the model to confirm every action. Remove that line, or limit it to locks, garage doors and alarms.
+- **Too many exposed entities.** Every exposed entity is sent with every message. A few hundred entities can push the conversation history out of the context window, so the agent forgets what you said a minute ago. Expose rooms and groups, not every bulb and sensor.
+- **Areas.** "Close the blinds" only works reliably when each blind has an area and a clear name.
+- **Tools.** If the agent can only call one function per message, it cannot look something up and then act. Allow several, and give it tools for announcements and timers if you want those.
+- **Speed and cost.** For plain commands like "turn off the kitchen lights", the built-in Home Assistant agent is instant and free.
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for what is planned to make this easier.
 
 ## Configuration
 

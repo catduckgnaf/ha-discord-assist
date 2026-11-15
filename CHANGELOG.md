@@ -2,6 +2,10 @@
 
 ## 0.3.1
 
+- Add a brand icon in `custom_components/discord_assist/brand/` (Home Assistant 2026.3+ reads it locally; the brands repository no longer takes custom integrations).
+- README: Marketplace install instructions and badge (HACS is built into Home Assistant 2026.11 as the Marketplace), plus a "Getting good answers" guide for tuning LLM agents.
+- Add `docs/ROADMAP.md` with the improvement list and the per-user permissions scope.
+- CI: run the HACS validator with no ignored checks.
 - Add the Home Assistant integration categories `ai_voice.voice_assistants` and `messaging_notifications.chat_apps` to the manifest, so the integration is categorised correctly in Home Assistant and the Marketplace catalog. No functional change.
 
 ## 0.3.0

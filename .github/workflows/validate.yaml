@@ -14,9 +14,6 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
-          # The integration is not listed in home-assistant/brands; skip that
-          # check until (if ever) a brands submission is accepted.
-          ignore: brands
   hassfest:
     runs-on: ubuntu-latest
     steps:
