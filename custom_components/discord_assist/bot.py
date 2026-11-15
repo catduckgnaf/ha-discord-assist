@@ -32,6 +32,7 @@ from .conversation_router import (
 )
 from .notes import MAX_NOTES_PER_USER, NoteLimitError, parse_notes_command
 from .recent_errors import RecentErrors
+from .slash_commands import build_command_tree
 from .snapshot import (
     SnapshotResult,
     parse_show_me_command,
@@ -198,6 +199,16 @@ class DiscordAssistClient(discord.Client):
         self._status_signal = status_signal
         self.placeholder_delay = float(placeholder_delay)
         self._entry_title = entry_title
+        self._commands_synced = False
+        # The client owns its slash-command tree. Building it needs a fully
+        # initialized discord.Client (http session and connection state), so
+        # a failure here (for example a test double) leaves _tree unset and
+        # the tree property builds it lazily on first real use.
+        self._tree: discord.app_commands.CommandTree | None = None
+        try:
+            self._tree = build_command_tree(self)
+        except Exception:  # noqa: BLE001 - slash commands must not break setup
+            _LOGGER.debug("Command tree deferred until first use", exc_info=True)
         self._sent_message_ids: set[int] = set()
         self._sent_message_order: deque[int] = deque()
         self._sent_nonces: set[str] = set()
@@ -324,8 +335,49 @@ class DiscordAssistClient(discord.Client):
             self.connected = connected
             async_dispatcher_send(self.hass, self._status_signal)
 
+    @property
+    def tree(self) -> discord.app_commands.CommandTree:
+        """The slash-command tree owned by this client (built lazily)."""
+        if self._tree is None:
+            self._tree = build_command_tree(self)
+        return self._tree
+
+    async def _sync_slash_commands(self) -> None:
+        """Copy the commands to each guild and sync per guild, once.
+
+        Guild sync applies immediately, unlike global sync. ``on_ready``
+        fires again after every full reconnect, so this only runs the first
+        time; ``on_guild_join`` covers servers joined later. A failure for
+        one guild must not stop the others, or the gateway connection.
+        """
+        if self._commands_synced:
+            return
+        self._commands_synced = True
+        try:
+            guilds = list(self.guilds)
+        except Exception:  # noqa: BLE001 - no guild view, nothing to sync
+            _LOGGER.debug("Cannot list guilds for command sync", exc_info=True)
+            return
+        for guild in guilds:
+            await self._sync_guild(guild)
+
+    async def _sync_guild(self, guild: discord.abc.Snowflake) -> None:
+        try:
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+        except Exception:  # noqa: BLE001 - one guild must not block others
+            _LOGGER.warning(
+                "Failed to sync slash commands to guild %s",
+                getattr(guild, "id", guild),
+                exc_info=True,
+            )
+
     async def on_ready(self) -> None:
         self._set_connected(True)
+        await self._sync_slash_commands()
+
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        await self._sync_guild(guild)
 
     async def on_resumed(self) -> None:
         self._set_connected(True)
@@ -334,24 +386,110 @@ class DiscordAssistClient(discord.Client):
         self._set_connected(False)
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
-        """Acknowledge an application command first, then handle it.
+        """Answer a text-bearing application command nothing else handles.
 
         Only application commands are handled here. Autocomplete cannot be
         deferred and must never reach the agent (it fires on every
         keystroke), and component and modal interactions belong to their
-        own dispatchers (discord.py views), which respond themselves; a
-        second defer from here would race them. Timeout and error outcomes
-        edit the deferred response instead of leaving Discord showing a
-        perpetual thinking indicator.
+        own dispatchers. discord.py dispatches commands registered on the
+        client's tree to the tree and then still fires this event, so those
+        are skipped here too, or the agent would run twice.
         """
         if (
             getattr(interaction, "type", None)
             != discord.InteractionType.application_command
         ):
             return
+        try:
+            tree = self.tree
+        except Exception:  # noqa: BLE001 - no tree, nothing registered on it
+            tree = None
+        data = getattr(interaction, "data", None)
+        name = data.get("name") if isinstance(data, Mapping) else None
+        if tree is not None and name and tree.get_command(name) is not None:
+            return
+        await self.answer_command(interaction)
+
+    def _interaction_scope(
+        self, interaction: discord.Interaction
+    ) -> tuple[bool, int, int | None] | None:
+        """``(is_dm, channel_id, parent_id)`` for an interaction, if known."""
+        channel = getattr(interaction, "channel", None)
+        channel_id = getattr(channel, "id", None) or getattr(
+            interaction, "channel_id", None
+        )
+        if channel_id is None:
+            return None
+        is_dm = isinstance(channel, discord.DMChannel) or (
+            getattr(interaction, "guild_id", None) is None
+        )
+        parent_id = channel.parent_id if isinstance(channel, discord.Thread) else None
+        return is_dm, channel_id, parent_id
+
+    def interaction_allowed(self, interaction: discord.Interaction) -> bool:
+        """The message gate for an interaction: listening rules and identity.
+
+        An explicit invocation is at least as intentional as a mention, so
+        it counts as one; DMs follow the DM option and channels the channel
+        list, exactly as messages do. Fails closed.
+        """
+        user = getattr(interaction, "user", None)
+        scope = self._interaction_scope(interaction)
+        if user is None or scope is None:
+            return False
+        is_dm, channel_id, parent_id = scope
+        if not self.router.should_respond(
+            is_dm=is_dm,
+            was_mentioned=True,
+            channel_id=channel_id,
+            author_id=user.id,
+            parent_id=parent_id,
+        ):
+            return False
+        return self.router.ha_user_for(user.id) is not None
+
+    def interaction_conversation_key(
+        self, interaction: discord.Interaction
+    ) -> str | None:
+        """The conversation key a command here shares with plain messages."""
+        scope = self._interaction_scope(interaction)
+        if scope is None:
+            return None
+        is_dm, channel_id, parent_id = scope
+        return self.router.conversation_key(
+            is_dm=is_dm,
+            channel_id=channel_id,
+            author_id=interaction.user.id,
+            parent_id=parent_id,
+        )
+
+    async def refuse_interaction(self, interaction: discord.Interaction) -> None:
+        """Refuse as the initial response, ephemerally, before any defer.
+
+        After a non-ephemeral defer Discord ignores the ephemeral flag on
+        the first followup, so the refusal must be the first response.
+        """
+        if interaction.response.is_done():
+            return
+        try:
+            await interaction.response.send_message(UNAUTHORIZED_REPLY, ephemeral=True)
+        except discord.HTTPException:
+            _LOGGER.debug("Could not send an interaction refusal", exc_info=True)
+
+    async def answer_command(
+        self, interaction: discord.Interaction, text: str | None = None
+    ) -> None:
+        """Gate, acknowledge, then answer a text command through the router.
+
+        Timeout and error outcomes edit the deferred response instead of
+        leaving Discord showing a perpetual thinking indicator.
+        """
+        if not self.interaction_allowed(interaction):
+            await self.refuse_interaction(interaction)
+            return
         async with acknowledged(interaction, thinking=True):
             try:
-                await self.handle_interaction(interaction)
+                await self.handle_interaction(interaction, text=text)
             except RateLimited as err:
                 # The interaction is already deferred, so it needs an answer;
                 # repeat refusals in the window get a bare one.
@@ -364,7 +502,9 @@ class DiscordAssistClient(discord.Client):
                 _LOGGER.exception("Interaction handling failed")
                 await self._edit_interaction_reply(interaction, ERROR_REPLY)
 
-    async def handle_interaction(self, interaction: discord.Interaction) -> None:
+    async def handle_interaction(
+        self, interaction: discord.Interaction, *, text: str | None = None
+    ) -> None:
         """Handle an already-acknowledged interaction.
 
         Minimal real handler: a text-bearing application command is
@@ -374,7 +514,8 @@ class DiscordAssistClient(discord.Client):
         and the slash command tree replace or extend this dispatch when
         they land, reusing :func:`acknowledged` the same way.
         """
-        text = interaction_text(interaction)
+        if text is None:
+            text = interaction_text(interaction)
         if text is None:
             _LOGGER.debug(
                 "Acknowledged interaction %s with no text prompt; "

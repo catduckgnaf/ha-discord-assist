@@ -31,9 +31,15 @@ class FakeResponse:
         self._events = events
         self._done = done
         self.defer_calls = []
+        self.sent_messages = []
 
     def is_done(self):
         return self._done
+
+    async def send_message(self, content=None, **kwargs):
+        self._events.append("send_message")
+        self.sent_messages.append((content, kwargs))
+        self._done = True
 
     async def defer(self, *, thinking=False, ephemeral=False):
         if self._done:
@@ -226,9 +232,12 @@ async def test_unauthorized_interaction_never_calls_agent(monkeypatch):
 
     await client.on_interaction(interaction)
 
-    assert events[0] == "defer"
+    # Refused as the initial, ephemeral response: no public defer first.
+    assert events == ["send_message"]
+    assert interaction.response.sent_messages == [
+        (UNAUTHORIZED_REPLY, {"ephemeral": True})
+    ]
     router.process.assert_not_called()
-    assert interaction.edited_content == UNAUTHORIZED_REPLY
 
 
 async def test_acknowledged_skips_defer_when_response_already_done():
