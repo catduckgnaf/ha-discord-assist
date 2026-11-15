@@ -12,6 +12,7 @@ from .conversation_router import (
     AgentTimeout,
     ConversationRouter,
     MessageContext,
+    RateLimited,
     make_conversation_key,
 )
 from .text_utils import chunk_message, strip_self_mention
@@ -21,6 +22,9 @@ _LOGGER = logging.getLogger(__name__)
 ERROR_REPLY = "Sorry, I hit an error talking to Home Assistant."
 EMPTY_REPLY = "(no response)"
 TIMEOUT_REPLY = "Sorry, Home Assistant took too long to answer. Try again?"
+RATE_LIMIT_REPLY = (
+    "Slow down: you are sending requests too quickly. Please wait a bit and try again."
+)
 
 
 class DiscordAssistClient(discord.Client):
@@ -91,6 +95,11 @@ class DiscordAssistClient(discord.Client):
         reply = ERROR_REPLY
         try:
             reply = await self._answer(message, text, key, where)
+        except RateLimited as err:
+            # One "Slow down" notice per throttle window, then silence.
+            if not err.should_notify:
+                return
+            reply = RATE_LIMIT_REPLY
         except AgentTimeout:
             reply = TIMEOUT_REPLY
         except Exception:  # noqa: BLE001 - never let the gateway die

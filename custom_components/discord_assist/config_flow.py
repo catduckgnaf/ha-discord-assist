@@ -44,6 +44,8 @@ from .const import (
     CONF_IDLE_MINUTES,
     CONF_LANGUAGE,
     CONF_PREFER_LOCAL,
+    CONF_RATE_LIMIT_BURST,
+    CONF_RATE_LIMIT_PER_MINUTE,
     CONF_RESPOND_DMS,
     CONF_RESPOND_MENTIONS,
     CONF_ROOM_MAP,
@@ -53,6 +55,8 @@ from .const import (
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_IDLE_MINUTES,
     DEFAULT_PREFER_LOCAL,
+    DEFAULT_RATE_LIMIT_BURST,
+    DEFAULT_RATE_LIMIT_PER_MINUTE,
     DEFAULT_RESPOND_DMS,
     DEFAULT_RESPOND_MENTIONS,
     DEFAULT_SPEAKER_CONTEXT,
@@ -116,6 +120,24 @@ def build_config_schema(channel_options: list[SelectOptionDict]) -> vol.Schema:
                     step=1,
                     mode=NumberSelectorMode.BOX,
                     unit_of_measurement="s",
+                )
+            ),
+            vol.Optional(
+                CONF_RATE_LIMIT_PER_MINUTE, default=DEFAULT_RATE_LIMIT_PER_MINUTE
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=600,
+                    step=1,
+                    mode=NumberSelectorMode.BOX,
+                    unit_of_measurement="requests/min",
+                )
+            ),
+            vol.Optional(
+                CONF_RATE_LIMIT_BURST, default=DEFAULT_RATE_LIMIT_BURST
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=1, max=100, step=1, mode=NumberSelectorMode.BOX
                 )
             ),
         }

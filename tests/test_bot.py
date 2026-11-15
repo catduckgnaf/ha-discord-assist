@@ -3,8 +3,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 
-from custom_components.discord_assist.bot import TIMEOUT_REPLY, DiscordAssistClient
-from custom_components.discord_assist.conversation_router import AgentTimeout
+from custom_components.discord_assist.bot import (
+    RATE_LIMIT_REPLY,
+    TIMEOUT_REPLY,
+    DiscordAssistClient,
+)
+from custom_components.discord_assist.conversation_router import (
+    AgentTimeout,
+    RateLimited,
+)
 
 
 def _message(
@@ -180,6 +187,27 @@ async def test_on_message_replies_on_timeout(monkeypatch):
     msg = _message("<@999> hi", mentions=[SimpleNamespace(id=999)])
     await client.on_message(msg)
     assert _first_send(msg).args[0] == TIMEOUT_REPLY
+
+
+async def test_on_message_slow_down_notice_once(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.process = AsyncMock(side_effect=RateLimited(should_notify=True))
+    client = _client(router, monkeypatch)
+    msg = _message("<@999> hi", mentions=[SimpleNamespace(id=999)])
+    await client.on_message(msg)
+    assert _first_send(msg).args[0] == RATE_LIMIT_REPLY
+    assert "Slow down" in RATE_LIMIT_REPLY
+
+
+async def test_on_message_rate_limited_silence_after_notice(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.process = AsyncMock(side_effect=RateLimited(should_notify=False))
+    client = _client(router, monkeypatch)
+    msg = _message("<@999> hi", mentions=[SimpleNamespace(id=999)])
+    await client.on_message(msg)
+    msg.channel.send.assert_not_awaited()
 
 
 async def test_long_reply_only_first_piece_is_a_reply(monkeypatch):

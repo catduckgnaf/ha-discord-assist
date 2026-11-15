@@ -21,7 +21,9 @@
           "allowlist": "Allowed Discord user IDs (act as the fallback user; mapped users are always allowed)",
           "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
           "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
-          "agent_timeout": "Give up on the agent after this many seconds"
+          "agent_timeout": "Give up on the agent after this many seconds",
+          "rate_limit_per_minute": "Max requests per Discord user per minute (0 = no limit)",
+          "rate_limit_burst": "Requests a Discord user may send in a burst before the limit applies"
         }
       },
       "reauth_confirm": {
@@ -81,7 +83,9 @@
           "fallback_ha_user": "Fallback Home Assistant user for unmapped Discord users",
           "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
           "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
-          "agent_timeout": "Give up on the agent after this many seconds"
+          "agent_timeout": "Give up on the agent after this many seconds",
+          "rate_limit_per_minute": "Max requests per Discord user per minute (0 = no limit)",
+          "rate_limit_burst": "Requests a Discord user may send in a burst before the limit applies"
         }
       },
       "add_user_map": {
