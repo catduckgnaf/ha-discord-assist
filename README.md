@@ -22,6 +22,7 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 - Optional local-first mode: Home Assistant's built-in commands answer instantly, the LLM handles the rest
 - One turn at a time per conversation, with a timeout instead of typing forever
 - Answers as Discord replies, and long code blocks split cleanly across messages
+- Standing preferences: each user can save short notes ("all the lights means all lights") that are passed to the agent on every turn
 - Maps Discord user IDs to Home Assistant users so commands run as the right person
 - Fails closed: Discord users it cannot run as a Home Assistant user are ignored
 - Replies can never ping `@everyone`, roles, or users
@@ -171,6 +172,23 @@ reset
 ```
 
 The bot drops the cached conversation for that channel or DM, replies "Started a fresh conversation.", and your next message begins a new conversation. A message that only contains the word, like "please reset the lights", is not a command and goes to the agent as usual.
+
+## Standing preferences (notes)
+
+Each authorized Discord user can save short standing preferences that the bot passes to the conversation agent on every turn, so corrections do not have to be repeated after a conversation resets. Send these as plain messages wherever the bot answers you; they are handled by the bot itself and never reach the agent as requests:
+
+- `remember: <note>` saves a note, for example `remember: all the lights means all lights`.
+- `notes` lists your own saved notes back, numbered.
+- `forget note <number>` removes one note by its number from that list.
+
+Notes are capped at 10 per user and 200 characters each, and control characters are stripped the same way Discord display names are cleaned. They persist across restarts in Home Assistant storage, per integration entry. In the integration options, **View and remove standing preferences (notes)** lists every saved note and removes the one you pick.
+
+How they reach the agent, and the limits of that:
+
+- Notes are **user-supplied text placed in a system prompt** (`extra_system_prompt`), as a `Standing preferences from <speaker>:` bullet list after the speaker context. Only the speaking user's own notes are included; nobody else's notes are ever sent.
+- They only work with agents that read `extra_system_prompt`; agents that ignore extra prompt text are unaffected.
+- Notes still apply when the **Speaker context** option is off: that option controls the speaker, channel, room and time facts, not your saved preferences.
+- Notes are **never permissions**. A note cannot authorize anyone, change which Home Assistant user a request runs as, or widen what that user may do. Treat note text as a preference you stated, not as an instruction the home must obey over its normal safeguards.
 
 ## Room channels
 

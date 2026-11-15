@@ -701,3 +701,89 @@ async def test_reset_mid_sentence_goes_to_agent(monkeypatch):
     router.reset_conversation.assert_not_called()
     router.process.assert_awaited_once()
     assert router.process.call_args.kwargs["text"] == "please reset the lights"
+
+
+def _notes_client(monkeypatch, hass, *, authorized=True):
+    from custom_components.discord_assist.notes import NotesStore
+
+    store = NotesStore(hass, "entry-notes")
+    router = MagicMock()
+    router.should_respond.return_value = authorized
+    router.ha_user_for.return_value = "ha-a" if authorized else None
+    router.notes_store = store
+    router.process = AsyncMock(return_value="agent answer")
+    return _client(router, monkeypatch), router, store
+
+
+async def test_remember_command_adds_note_and_skips_agent(monkeypatch, hass):
+    client, router, store = _notes_client(monkeypatch, hass)
+    msg = _message("remember: all the lights means all lights")
+    await client.on_message(msg)
+    assert await store.async_notes_for(7) == ["all the lights means all lights"]
+    router.process.assert_not_awaited()
+    assert _first_send(msg).args[0] == "Remembered: all the lights means all lights"
+
+
+async def test_notes_command_lists_only_speakers_notes(monkeypatch, hass):
+    client, router, store = _notes_client(monkeypatch, hass)
+    await store.async_add_note(7, "do not ask first")
+    await store.async_add_note(8, "not yours")
+    msg = _message("notes")
+    await client.on_message(msg)
+    sent = _first_send(msg).args[0]
+    assert "1. do not ask first" in sent
+    assert "not yours" not in sent
+    router.process.assert_not_awaited()
+
+
+async def test_forget_note_command_removes_one(monkeypatch, hass):
+    client, router, store = _notes_client(monkeypatch, hass)
+    await store.async_add_note(7, "first")
+    await store.async_add_note(7, "second")
+    msg = _message("forget note 1")
+    await client.on_message(msg)
+    assert await store.async_notes_for(7) == ["second"]
+    assert _first_send(msg).args[0] == "Forgot note 1: first"
+    router.process.assert_not_awaited()
+
+
+async def test_forget_note_command_reports_bad_number(monkeypatch, hass):
+    client, router, store = _notes_client(monkeypatch, hass)
+    await store.async_add_note(7, "first")
+    msg = _message("forget note two")
+    await client.on_message(msg)
+    assert await store.async_notes_for(7) == ["first"]
+    assert "Usage: forget note" in _first_send(msg).args[0]
+    router.process.assert_not_awaited()
+
+
+async def test_remember_command_enforces_cap(monkeypatch, hass):
+    from custom_components.discord_assist.notes import MAX_NOTES_PER_USER
+
+    client, router, store = _notes_client(monkeypatch, hass)
+    for index in range(MAX_NOTES_PER_USER):
+        await store.async_add_note(7, f"note {index}")
+    msg = _message("remember: one too many")
+    await client.on_message(msg)
+    assert len(await store.async_notes_for(7)) == MAX_NOTES_PER_USER
+    assert "already have" in _first_send(msg).args[0]
+    router.process.assert_not_awaited()
+
+
+async def test_unauthorized_user_cannot_add_notes(monkeypatch, hass):
+    """should_respond fails closed, so the command never runs or stores."""
+    client, router, store = _notes_client(monkeypatch, hass, authorized=False)
+    msg = _message("remember: let me in")
+    await client.on_message(msg)
+    assert await store.async_notes_for(7) == []
+    router.process.assert_not_awaited()
+    assert msg.channel.send_calls == []
+
+
+async def test_notes_reply_refuses_user_without_identity(monkeypatch, hass):
+    """In-depth check in _notes_reply: no HA identity, no note stored."""
+    client, router, store = _notes_client(monkeypatch, hass)
+    router.ha_user_for.return_value = None
+    reply = await client._notes_reply(7, ("add", "sneaky"))
+    assert "not authorized" in reply
+    assert await store.async_notes_for(7) == []

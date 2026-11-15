@@ -29,6 +29,7 @@ from .const import (
     signal_connection,
 )
 from .conversation_router import ConversationRouter
+from .notes import NotesStore
 from .recent_errors import RecentErrors
 
 _LOGGER = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ class RuntimeData:
 
     client: DiscordAssistClient
     router: ConversationRouter
+    notes_store: NotesStore | None = None
     recent_errors: RecentErrors = field(default_factory=RecentErrors)
 
 
@@ -83,7 +85,9 @@ def _legacy_entry_uses_same_token(hass: HomeAssistant, token: str) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> bool:
     """Set up Discord Assist from a config entry."""
-    router = ConversationRouter.from_entry(hass, entry)
+    notes_store = NotesStore(hass, entry.entry_id)
+    await notes_store.async_load()
+    router = ConversationRouter.from_entry(hass, entry, notes_store=notes_store)
     if not router.has_authorized_users:
         _LOGGER.warning(
             "No Discord users are authorized for %s; the bot will ignore everyone "
@@ -122,7 +126,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         raise ConfigEntryNotReady(f"Could not reach Discord: {err}") from err
 
     entry.runtime_data = RuntimeData(
-        client=client, router=router, recent_errors=recent_errors
+        client=client,
+        router=router,
+        recent_errors=recent_errors,
+        notes_store=notes_store,
     )
 
     async def _run() -> None:
@@ -166,7 +173,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> 
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Clean up repair issues when the entry is deleted."""
+    """Clean up repair issues and stored notes when the entry is deleted."""
+    await NotesStore(hass, entry.entry_id).async_remove()
     for kind in (
         ISSUE_NO_AUTHORIZED_USERS,
         ISSUE_MESSAGE_CONTENT_INTENT,

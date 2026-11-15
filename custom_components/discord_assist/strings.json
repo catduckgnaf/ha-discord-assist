@@ -77,7 +77,8 @@
           "add_agent_user": "Use a specific agent for a Discord user",
           "remove_agent_user": "Remove a per-user agent",
           "add_agent_channel": "Use a specific agent in a channel",
-          "remove_agent_channel": "Remove a per-channel agent"
+          "remove_agent_channel": "Remove a per-channel agent",
+          "remove_note": "View and remove standing preferences (notes)"
         }
       },
       "settings": {
@@ -169,13 +170,21 @@
         "data": {
           "channel_id": "Discord channel ID"
         }
+      },
+      "remove_note": {
+        "title": "Standing preferences (notes)",
+        "description": "Every saved note is listed with its Discord user ID and number. Picking one removes it. Notes are added from Discord by sending a remember message.",
+        "data": {
+          "note_key": "Note to remove"
+        }
       }
     },
     "abort": {
       "no_rooms": "No channels are mapped to rooms.",
       "no_channel_idle": "No channels have a per-channel idle reset.",
       "no_user_agents": "No Discord users have their own agent.",
-      "no_channel_agents": "No channels have their own agent."
+      "no_channel_agents": "No channels have their own agent.",
+      "no_notes": "No standing preferences are saved yet."
     }
   },
   "entity": {

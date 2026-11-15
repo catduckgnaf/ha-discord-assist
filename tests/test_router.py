@@ -605,6 +605,79 @@ async def test_speaker_context_off_sends_no_prompt():
     assert conv.call_args.kwargs["extra_system_prompt"] is None
 
 
+class _FakeNotesStore:
+    """In-memory stand-in with the NotesStore read interface."""
+
+    def __init__(self, notes):
+        self._notes = notes
+
+    async def async_notes_for(self, discord_user_id):
+        return list(self._notes.get(discord_user_id, []))
+
+
+async def test_only_speakers_notes_are_injected():
+    store = _FakeNotesStore(
+        {7: ["all the lights means all lights", "do not ask first"], 8: ["secret"]}
+    )
+    router = _router(user_map={7: "ha-a", 8: "ha-a"}, notes_store=store)
+    with patch(_CONVERSE, new=AsyncMock(return_value=_result())) as conv:
+        await router.process(
+            text="hi",
+            discord_user_id=7,
+            conversation_key="dm:7",
+            where=MessageContext(display_name="Catduck"),
+        )
+    prompt = conv.call_args.kwargs["extra_system_prompt"]
+    assert prompt == (
+        "Standing preferences from Catduck:\n"
+        "- all the lights means all lights\n"
+        "- do not ask first"
+    )
+    assert "secret" not in prompt
+
+
+async def test_notes_inject_even_when_speaker_context_off():
+    """Decision: notes are not coupled to the speaker_context switch."""
+    store = _FakeNotesStore({7: ["do not ask first"]})
+    router = _router(user_map={7: "ha-a"}, notes_store=store, speaker_context=False)
+    with patch(_CONVERSE, new=AsyncMock(return_value=_result())) as conv:
+        await router.process(
+            text="hi",
+            discord_user_id=7,
+            conversation_key="dm:7",
+            where=MessageContext(display_name="Catduck"),
+        )
+    prompt = conv.call_args.kwargs["extra_system_prompt"]
+    assert prompt == "Standing preferences from Catduck:\n- do not ask first"
+
+
+async def test_notes_come_after_speaker_context(hass):
+    user = await hass.auth.async_create_user("Andrew")
+    store = _FakeNotesStore({7: ["do not ask first"]})
+    router = _router(
+        hass=hass, user_map={7: user.id}, notes_store=store, speaker_context=True
+    )
+    with patch(_CONVERSE, new=AsyncMock(return_value=_result())) as conv:
+        await router.process(
+            text="hi",
+            discord_user_id=7,
+            conversation_key="dm:7",
+            where=MessageContext(display_name="Catduck"),
+        )
+    prompt = conv.call_args.kwargs["extra_system_prompt"]
+    assert prompt.index("Speaker: Catduck") < prompt.index(
+        "Standing preferences from Catduck:\n- do not ask first"
+    )
+
+
+async def test_no_notes_sends_no_notes_section():
+    store = _FakeNotesStore({})
+    router = _router(user_map={7: "ha-a"}, notes_store=store)
+    with patch(_CONVERSE, new=AsyncMock(return_value=_result())) as conv:
+        await router.process(text="hi", discord_user_id=7, conversation_key="dm:7")
+    assert conv.call_args.kwargs["extra_system_prompt"] is None
+
+
 def test_from_entry_reads_new_options():
     entry = SimpleNamespace(
         options={

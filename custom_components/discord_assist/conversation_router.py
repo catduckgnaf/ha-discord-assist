@@ -57,6 +57,7 @@ from .conversation_cache import (
     RateLimiter,
     TurnLocks,
 )
+from .notes import NotesStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -232,6 +233,7 @@ class ConversationRouter:
     rate_limit_burst: int = DEFAULT_RATE_LIMIT_BURST
     rate_limiter: RateLimiter | None = None
     turns: TurnLocks = field(default_factory=TurnLocks)
+    notes_store: NotesStore | None = None
     config_entry_id: str | None = None
     event_exclude_text: bool = DEFAULT_EVENT_EXCLUDE_TEXT
 
@@ -393,7 +395,13 @@ class ConversationRouter:
             try:
                 async with asyncio.timeout(self.agent_timeout):
                     return await self._converse(
-                        text, conversation_key, context, device_id, where, agent_id
+                        text,
+                        conversation_key,
+                        context,
+                        device_id,
+                        where,
+                        agent_id,
+                        discord_user_id=discord_user_id,
                     )
             except TimeoutError as err:
                 raise AgentTimeout from err
@@ -406,6 +414,8 @@ class ConversationRouter:
         device_id: str | None,
         where: MessageContext,
         agent_id: str | None,
+        *,
+        discord_user_id: int | None = None,
     ) -> str:
         # Prefer-local applies on top of the resolved agent: the local agent
         # is tried first unless the resolved agent already is the local one.
@@ -424,11 +434,17 @@ class ConversationRouter:
             if not _local_needs_fallback(local):
                 return _speech(local)
 
-        extra = (
-            await self._speaker_prompt(context.user_id, device_id, where)
-            if self.speaker_context
-            else None
-        )
+        # Standing preferences are deliberately NOT coupled to the
+        # speaker_context switch: that switch controls the speaker/channel/
+        # time facts, while notes are the speaker's own saved preferences.
+        # Notes still inject when speaker context is off, after it when on.
+        parts: list[str] = []
+        if self.speaker_context:
+            parts.append(await self._speaker_prompt(context.user_id, device_id, where))
+        notes_prompt = await self._notes_prompt(discord_user_id, where)
+        if notes_prompt:
+            parts.append(notes_prompt)
+        extra = "\n".join(parts) if parts else None
         result = await async_converse(
             self.hass,
             text,
@@ -470,6 +486,25 @@ class ConversationRouter:
         lines.append(f"Local time: {dt_util.now().strftime('%A %Y-%m-%d %H:%M')}.")
         return "\n".join(lines)
 
+    async def _notes_prompt(
+        self, discord_user_id: int | None, where: MessageContext
+    ) -> str | None:
+        """Only the speaker's own standing preferences, as a bullet list.
+
+        Notes are keyed by Discord user id, never by Home Assistant user, so
+        two Discord users who act as the same HA user never see each other's
+        notes. They are user-supplied prompt text, not permissions.
+        """
+        if self.notes_store is None or discord_user_id is None:
+            return None
+        notes = await self.notes_store.async_notes_for(discord_user_id)
+        if not notes:
+            return None
+        speaker = _clean_name(where.display_name) or "the speaker"
+        lines = [f"Standing preferences from {speaker}:"]
+        lines.extend(f"- {note}" for note in notes)
+        return "\n".join(lines)
+
     def _area_name(self, device_id: str | None) -> str | None:
         if not device_id:
             return None
@@ -480,7 +515,12 @@ class ConversationRouter:
         return area.name if area else None
 
     @classmethod
-    def from_entry(cls, hass: HomeAssistant, entry: ConfigEntry) -> ConversationRouter:
+    def from_entry(
+        cls,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        notes_store: NotesStore | None = None,
+    ) -> ConversationRouter:
         opts = entry.options
         channel_idle = _coerce_int_map(
             opts.get(CONF_CHANNEL_IDLE_MINUTES), "channel idle minutes"
@@ -528,4 +568,5 @@ class ConversationRouter:
             rate_limit_burst=_coerce_int_option(
                 opts, CONF_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_BURST
             ),
+            notes_store=notes_store,
         )

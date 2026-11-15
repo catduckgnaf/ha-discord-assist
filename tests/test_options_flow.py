@@ -57,6 +57,7 @@ async def test_options_menu_shown(hass: HomeAssistant):
         "remove_agent_user",
         "add_agent_channel",
         "remove_agent_channel",
+        "remove_note",
     }
 
 
@@ -409,3 +410,37 @@ async def test_remove_channel_idle_aborts_when_none(hass: HomeAssistant):
     )
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "no_channel_idle"
+
+
+async def test_remove_note_lists_and_removes(hass: HomeAssistant):
+    from custom_components.discord_assist.notes import NotesStore
+
+    entry = _entry(hass)
+    store = NotesStore(hass, entry.entry_id)
+    await store.async_add_note(7, "do not ask first")
+    await store.async_add_note(7, "all the lights means all lights")
+    await store.async_add_note(8, "someone else")
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "remove_note"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "remove_note"
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"note_key": "7:1"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    fresh = NotesStore(hass, entry.entry_id)
+    assert await fresh.async_notes_for(7) == ["all the lights means all lights"]
+    assert await fresh.async_notes_for(8) == ["someone else"]
+
+
+async def test_remove_note_aborts_when_none(hass: HomeAssistant):
+    entry = _entry(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "remove_note"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "no_notes"

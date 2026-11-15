@@ -9,6 +9,7 @@ import voluptuous as vol
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigEntryDisabler,
+    ConfigEntryState,
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
@@ -75,6 +76,7 @@ from .const import (
     LEGACY_DOMAIN,
 )
 from .discord_api import CannotConnect, InvalidAuth, list_text_channels, validate_token
+from .notes import NotesStore
 
 
 def _agent_selector() -> EntitySelector:
@@ -365,6 +367,7 @@ class DiscordAssistOptionsFlow(OptionsFlowWithReload):
                 "remove_agent_user",
                 "add_agent_channel",
                 "remove_agent_channel",
+                "remove_note",
             ],
         )
 
@@ -646,3 +649,51 @@ class DiscordAssistOptionsFlow(OptionsFlowWithReload):
             return self.async_abort(reason="no_channel_agents")
         schema = vol.Schema({vol.Required("channel_id"): vol.In(sorted(agent_map))})
         return self.async_show_form(step_id="remove_agent_channel", data_schema=schema)
+
+    async def async_step_remove_note(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show every user's standing preferences and remove the picked one.
+
+        Notes live in the per-entry NotesStore, not in entry options, so the
+        form lists them as labeled options (visible) and removal writes back
+        to the store; the entry itself is returned unchanged.
+        """
+        # Use the running entry's store when it is loaded: a second store
+        # would leave the bot injecting the removed note, and the next
+        # remember/forget would write it back. Removing a note does not
+        # change the options, so the entry is not reloaded.
+        runtime = getattr(self.config_entry, "runtime_data", None)
+        store = getattr(runtime, "notes_store", None)
+        if store is None or self.config_entry.state is not ConfigEntryState.LOADED:
+            store = NotesStore(self.hass, self.config_entry.entry_id)
+        if user_input is not None:
+            user_id, _, index = str(user_input["note_key"]).partition(":")
+            try:
+                await store.async_remove_note(int(user_id), int(index))
+            except ValueError:
+                pass
+            return self.async_create_entry(
+                title="", data=dict(self.config_entry.options)
+            )
+        all_notes = await store.async_all_notes()
+        if not all_notes:
+            return self.async_abort(reason="no_notes")
+        options = [
+            SelectOptionDict(
+                value=f"{user_id}:{index}",
+                label=f"{user_id} #{index}: {note}",
+            )
+            for user_id, notes in sorted(all_notes.items())
+            for index, note in enumerate(notes, start=1)
+        ]
+        schema = vol.Schema(
+            {
+                vol.Required("note_key"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=options, mode=SelectSelectorMode.DROPDOWN
+                    )
+                )
+            }
+        )
+        return self.async_show_form(step_id="remove_note", data_schema=schema)
