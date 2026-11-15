@@ -23,6 +23,7 @@ CONF_SPEAKER_CONTEXT = "speaker_context"
 CONF_PREFER_LOCAL = "prefer_local"
 CONF_AGENT_TIMEOUT = "agent_timeout"
 CONF_ROOM_MAP = "room_map"
+CONF_HA_MCP_API_ID = "ha_mcp_api_id"
 
 DEFAULT_RESPOND_DMS = True
 DEFAULT_RESPOND_MENTIONS = True
@@ -39,6 +40,7 @@ RECONNECT_DELAY = 60
 
 ISSUE_NO_AUTHORIZED_USERS = "no_authorized_users"
 ISSUE_MESSAGE_CONTENT_INTENT = "message_content_intent"
+ISSUE_HA_MCP_API_MISSING = "ha_mcp_api_missing"
 
 
 def signal_connection(entry_id: str) -> str:

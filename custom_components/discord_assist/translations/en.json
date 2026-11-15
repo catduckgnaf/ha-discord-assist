@@ -79,6 +79,7 @@
           "language": "Language (blank = Home Assistant default)",
           "allowlist": "Allowed Discord user IDs (act as the fallback user; mapped users are always allowed)",
           "fallback_ha_user": "Fallback Home Assistant user for unmapped Discord users",
+          "ha_mcp_api_id": "LLM API for the bundled agent's ha-mcp tools",
           "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
           "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
           "agent_timeout": "Give up on the agent after this many seconds"
@@ -131,6 +132,10 @@
     "message_content_intent": {
       "title": "{entry_title} needs the Message Content intent",
       "description": "Discord refused the gateway connection because the bot does not have the Message Content privileged intent. Enable it under Bot > Privileged Gateway Intents in the Discord Developer Portal, then reload the integration."
+    },
+    "ha_mcp_api_missing": {
+      "title": "{entry_title} cannot reach the ha-mcp tools",
+      "description": "The bundled agent takes its tools from the in-process ha-mcp server, but no ha-mcp LLM API is registered. Install ha-mcp, add the HA-MCP Server entry, and in its options turn on Conversation-agent LLM API with tool exposure set to Both. The Discord bot still works; the agent just has no ha-mcp tools. If ha-mcp was enabled after Discord Assist, reload this entry to clear this issue."
     }
   }
 }

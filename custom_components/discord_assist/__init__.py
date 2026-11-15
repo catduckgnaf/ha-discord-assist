@@ -16,8 +16,10 @@ from homeassistant.helpers import issue_registry as ir
 
 from .bot import DiscordAssistClient
 from .const import (
+    CONF_HA_MCP_API_ID,
     CONF_TOKEN,
     DOMAIN,
+    ISSUE_HA_MCP_API_MISSING,
     ISSUE_MESSAGE_CONTENT_INTENT,
     ISSUE_NO_AUTHORIZED_USERS,
     RECONNECT_DELAY,
@@ -25,6 +27,7 @@ from .const import (
     signal_connection,
 )
 from .conversation_router import ConversationRouter
+from .mcp_bridge import HaMcpBridge
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,12 +40,19 @@ class RuntimeData:
 
     client: DiscordAssistClient
     router: ConversationRouter
+    mcp_bridge: HaMcpBridge
 
 
 type DiscordConfigEntry = ConfigEntry[RuntimeData]
 
 
-def _set_issue(hass: HomeAssistant, entry: ConfigEntry, kind: str, active: bool):
+def _set_issue(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    kind: str,
+    active: bool,
+    severity: ir.IssueSeverity = ir.IssueSeverity.ERROR,
+):
     """Raise or clear one of this entry's repair issues."""
     if active:
         ir.async_create_issue(
@@ -50,7 +60,7 @@ def _set_issue(hass: HomeAssistant, entry: ConfigEntry, kind: str, active: bool)
             DOMAIN,
             issue_id(kind, entry.entry_id),
             is_fixable=False,
-            severity=ir.IssueSeverity.ERROR,
+            severity=severity,
             translation_key=kind,
             translation_placeholders={"entry_title": entry.title},
         )
@@ -70,6 +80,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
     _set_issue(hass, entry, ISSUE_NO_AUTHORIZED_USERS, not router.has_authorized_users)
     _set_issue(hass, entry, ISSUE_MESSAGE_CONTENT_INTENT, False)
 
+    # The bundled agent's tools come from the in-process ha-mcp server's
+    # LLM API. Its absence only costs the agent its tools, so setup
+    # continues and a repair issue explains what to enable. The check runs
+    # at setup: if ha-mcp is enabled afterwards, reloading this entry
+    # re-checks and clears the issue.
+    bridge = HaMcpBridge(
+        hass, preferred_api_id=entry.options.get(CONF_HA_MCP_API_ID) or None
+    )
+    if not bridge.available:
+        _LOGGER.info(
+            "No ha-mcp LLM API is registered; %s loads without ha-mcp tools",
+            entry.title,
+        )
+    _set_issue(
+        hass,
+        entry,
+        ISSUE_HA_MCP_API_MISSING,
+        not bridge.available,
+        severity=ir.IssueSeverity.WARNING,
+    )
+
     client = DiscordAssistClient(hass, router, signal_connection(entry.entry_id))
     # Log in over REST first so a dead network or bad token surfaces here,
     # where Home Assistant retries with backoff or starts reauth.
@@ -82,7 +113,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         await client.close()
         raise ConfigEntryNotReady(f"Could not reach Discord: {err}") from err
 
-    entry.runtime_data = RuntimeData(client=client, router=router)
+    entry.runtime_data = RuntimeData(client=client, router=router, mcp_bridge=bridge)
 
     async def _run() -> None:
         try:
@@ -124,5 +155,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Clean up repair issues when the entry is deleted."""
-    for kind in (ISSUE_NO_AUTHORIZED_USERS, ISSUE_MESSAGE_CONTENT_INTENT):
+    for kind in (
+        ISSUE_NO_AUTHORIZED_USERS,
+        ISSUE_MESSAGE_CONTENT_INTENT,
+        ISSUE_HA_MCP_API_MISSING,
+    ):
         ir.async_delete_issue(hass, DOMAIN, issue_id(kind, entry.entry_id))

@@ -26,6 +26,7 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 - Retries setup when Discord is unreachable and reloads if the gateway dies
 - `Discord gateway` connectivity sensor for alerting
 - Repair issues for "nobody is authorized" and a missing Message Content intent
+- Discovers the in-process ha-mcp toolset as an LLM API for the bundled agent, filtered per Home Assistant user (no MCP URL or token to configure)
 - One-click import from the Discord Conversation integration it was forked from
 
 ## Security model
@@ -110,6 +111,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for what is planned to make this easier.
 | Speaker context | Yes | Sends the agent the speaker's Discord name and Home Assistant user, the channel, the room (for room channels), and the local time, as extra system prompt text. Agents that ignore extra prompt text are unaffected |
 | Built-in commands first | No | Tries `conversation.home_assistant` first and only asks your agent when the built-in agent does not understand the request or finds no matching device. A command it matched but failed is not retried, so nothing runs twice |
 | Agent timeout | 60 s | Gives up and says so instead of typing forever |
+| ha-mcp tools API (options only) | Auto-detect | Which registered LLM API supplies the bundled agent's ha-mcp tools. Auto-detect uses the ha-mcp full-catalog API; pick one only with more than one HA-MCP Server entry |
 
 ## Room channels
 
@@ -133,6 +135,42 @@ Map a Discord user ID to a specific Home Assistant user so commands run with tha
 ### Fallback user
 
 Set **Fallback Home Assistant user** in options to control which HA user is used for Discord users who have no explicit mapping. Use a dedicated, least-privilege account for this.
+
+## ha-mcp tools for the bundled agent
+
+The bundled agent (in development) takes its tools from [ha-mcp](https://github.com/homeassistant-ai/ha-mcp) running **in-process**, as the HA-MCP Server entry of the `ha_mcp_tools` integration. That entry registers its toolset as a Home Assistant LLM API, and Discord Assist discovers it in-process: there is no MCP client, URL, token, or session to configure here, and Discord Assist has never had an HTTP MCP setting to remove.
+
+### Requirements
+
+- ha-mcp installed with an **HA-MCP Server** entry (the in-process server), set up with a dedicated local-only administrator account, as ha-mcp's own guide recommends. A ha-mcp release whose in-process server offers the conversation-agent LLM API options below (ha-mcp's in-process server guide covers 9.0.0 and later).
+- On the HA-MCP Server entry's options:
+  - **Conversation-agent LLM API:** on.
+  - **Conversation-agent tool exposure:** Both, so Discord Assist can use the full catalog and filter it per user itself, while other agents keep tool search.
+- Per-tool **LLM API** toggles in the HA-MCP panel: restart, reload, backup, beta and developer tools are hidden from agents by default. Leave them hidden unless a profile needs them.
+
+If no ha-mcp LLM API is registered when Discord Assist loads, a repair issue appears under **Settings → System → Repairs** and the bot still works; the agent just has no ha-mcp tools. If you enable ha-mcp afterwards, reload the Discord Assist entry to clear the issue.
+
+### How callers are gated
+
+ha-mcp executes tools as its administrator account, so Discord Assist treats its own per-user gate as the security boundary:
+
+- Tool calls always run with the caller's Home Assistant user. A call with no user is refused; nothing runs identity-less.
+- Administrators get the full catalog.
+- Everyone else only gets tools for entities that are exposed to Assist **and** that they may control. A call naming an entity outside that set is refused, and tools bound to such an entity are not offered at all.
+
+With more than one HA-MCP Server entry, auto-detection picks the first full-catalog API; pin a specific one under **LLM API for the bundled agent's ha-mcp tools** in the Discord Assist options.
+
+### Moving from the ha-mcp app
+
+ha-mcp says to run one install method only. Discord Assist needs nothing changed on its side (it never pointed at the app), but the ha-mcp move itself, with no URL change for your other MCP clients, is:
+
+1. Create a dedicated local-only administrator account for HA-MCP.
+2. Add the HA-MCP Server entry with that account; remote access through Home Assistant off if a reverse proxy is used; network access set to local network.
+3. Options: port 9584 (the app uses 9583), authentication mode `none` if clients use the plain secret URL, custom direct-access path set to the app's current secret path.
+4. Point the reverse proxy from the app's port to 9584, then stop the app (do not uninstall until verified).
+5. Rollback: start the app and restore the proxy config.
+
+The app's tool settings (disabled, pinned, policies) must be recreated if any were set; the app's automatic edit-backup history stays with the app.
 
 ## Development
 

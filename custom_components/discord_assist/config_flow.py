@@ -15,6 +15,7 @@ from homeassistant.config_entries import (
     OptionsFlowWithReload,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import llm
 from homeassistant.helpers.selector import (
     BooleanSelector,
     DeviceSelector,
@@ -41,6 +42,7 @@ from .const import (
     CONF_BOT_ID,
     CONF_CHANNELS,
     CONF_FALLBACK_USER,
+    CONF_HA_MCP_API_ID,
     CONF_IDLE_MINUTES,
     CONF_LANGUAGE,
     CONF_PREFER_LOCAL,
@@ -268,6 +270,25 @@ async def _ha_user_options(hass: HomeAssistant) -> list[SelectOptionDict]:
     ]
 
 
+def _llm_api_options(
+    hass: HomeAssistant, current: str | None
+) -> list[SelectOptionDict]:
+    """LLM APIs the bundled agent could take its ha-mcp tools from.
+
+    The empty value is auto-detection (the ha-mcp full-catalog API). A
+    stored pick that is not registered right now (ha-mcp unloaded) stays
+    listed so the form can still show and keep it.
+    """
+    options = [SelectOptionDict(value="", label="Auto-detect the ha-mcp API")]
+    seen = {""}
+    for api in llm.async_get_apis(hass):
+        options.append(SelectOptionDict(value=api.id, label=f"{api.name} ({api.id})"))
+        seen.add(api.id)
+    if current and current not in seen:
+        options.append(SelectOptionDict(value=current, label=current))
+    return options
+
+
 class DiscordAssistOptionsFlow(OptionsFlowWithReload):
     """Options: general settings, user mappings, and room channels."""
 
@@ -299,6 +320,7 @@ class DiscordAssistOptionsFlow(OptionsFlowWithReload):
             merged = dict(self.config_entry.options)
             merged.update(user_input)
             merged[CONF_LANGUAGE] = merged.get(CONF_LANGUAGE) or None
+            merged[CONF_HA_MCP_API_ID] = merged.get(CONF_HA_MCP_API_ID) or None
             return self.async_create_entry(title="", data=merged)
 
         channel_options = await self._channel_options()
@@ -309,7 +331,16 @@ class DiscordAssistOptionsFlow(OptionsFlowWithReload):
                     SelectSelectorConfig(
                         options=user_options, mode=SelectSelectorMode.DROPDOWN
                     )
-                )
+                ),
+                vol.Optional(CONF_HA_MCP_API_ID): SelectSelector(
+                    SelectSelectorConfig(
+                        options=_llm_api_options(
+                            self.hass,
+                            self.config_entry.options.get(CONF_HA_MCP_API_ID),
+                        ),
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
             }
         )
         return self.async_show_form(
