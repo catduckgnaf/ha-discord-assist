@@ -16,6 +16,13 @@ from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
+from .buttons import (
+    ButtonHandler,
+    ButtonOutcome,
+    ButtonStore,
+    parse_custom_id,
+    retired_content,
+)
 from .const import (
     DEFAULT_PLACEHOLDER_DELAY,
     DOMAIN,
@@ -46,6 +53,10 @@ ERROR_REPLY = "Sorry, I hit an error talking to Home Assistant."
 EMPTY_REPLY = "(no response)"
 TIMEOUT_REPLY = "Sorry, Home Assistant took too long to answer. Try again?"
 RESET_REPLY = "Started a fresh conversation."
+ALREADY_HANDLED_REPLY = "Already handled."
+NOT_ALLOWED_REPLY = "You are not allowed to use this button."
+HANDLED_REPLY = "Handled."
+BUTTON_ERROR_REPLY = "Sorry, that button hit an error."
 RATE_LIMIT_REPLY = (
     "Slow down: you are sending requests too quickly. Please wait a bit and try again."
 )
@@ -182,6 +193,8 @@ class DiscordAssistClient(discord.Client):
         placeholder_delay: float = DEFAULT_PLACEHOLDER_DELAY,
         recent_errors: RecentErrors | None = None,
         entry_title: str | None = None,
+        button_store: ButtonStore | None = None,
+        button_handlers: dict[str, ButtonHandler] | None = None,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -200,6 +213,8 @@ class DiscordAssistClient(discord.Client):
         self.placeholder_delay = float(placeholder_delay)
         self._entry_title = entry_title
         self._commands_synced = False
+        self.button_store = button_store
+        self._button_handlers: dict[str, ButtonHandler] = dict(button_handlers or {})
         # The client owns its slash-command tree. Building it needs a fully
         # initialized discord.Client (http session and connection state), so
         # a failure here (for example a test double) leaves _tree unset and
@@ -330,6 +345,10 @@ class DiscordAssistClient(discord.Client):
             translation_placeholders={"entry_title": self._entry_title or ""},
         )
 
+    def register_button_handler(self, action: str, handler: ButtonHandler) -> None:
+        """Register the coroutine run when a button with ``action`` is pressed."""
+        self._button_handlers[action] = handler
+
     def _set_connected(self, connected: bool) -> None:
         if connected != self.connected:
             self.connected = connected
@@ -395,10 +414,11 @@ class DiscordAssistClient(discord.Client):
         client's tree to the tree and then still fires this event, so those
         are skipped here too, or the agent would run twice.
         """
-        if (
-            getattr(interaction, "type", None)
-            != discord.InteractionType.application_command
-        ):
+        interaction_type = getattr(interaction, "type", None)
+        if interaction_type == discord.InteractionType.component:
+            await self.dispatch_button(interaction)
+            return
+        if interaction_type != discord.InteractionType.application_command:
             return
         try:
             tree = self.tree
@@ -409,6 +429,130 @@ class DiscordAssistClient(discord.Client):
         if tree is not None and name and tree.get_command(name) is not None:
             return
         await self.answer_command(interaction)
+
+    async def dispatch_button(self, interaction: discord.Interaction) -> None:
+        """Dispatch a button press by its stateless custom_id.
+
+        No View needs to be alive, so buttons keep working across restarts.
+        Anything without our ``da:`` prefix belongs to another bot or feature
+        and is ignored without acknowledging it.
+        """
+        data = getattr(interaction, "data", None) or {}
+        custom_id = (
+            data.get("custom_id")
+            if isinstance(data, dict)
+            else getattr(data, "custom_id", None)
+        )
+        parsed = parse_custom_id(custom_id)
+        if parsed is None:
+            return
+        action, record_id = parsed
+
+        # Acknowledge promptly (Discord allows about 3 seconds); the real
+        # work and the visible result follow as a followup / message edit.
+        await self._ack_interaction(interaction)
+
+        if self.button_store is None:
+            await self._respond_interaction(interaction, ALREADY_HANDLED_REPLY)
+            return
+
+        record = await self.button_store.peek(record_id)
+        if record is None or record.action != action:
+            await self._respond_interaction(interaction, ALREADY_HANDLED_REPLY)
+            return
+
+        # Authorization fails closed, and is checked before claiming so an
+        # unauthorized press never consumes someone else's button.
+        presser_id = getattr(getattr(interaction, "user", None), "id", None)
+        authorized = (
+            presser_id is not None
+            and self.router.ha_user_for(presser_id) is not None
+            and record.allows(presser_id)
+        )
+        if not authorized:
+            await self._respond_interaction(interaction, NOT_ALLOWED_REPLY)
+            return
+
+        # Single-use: whoever takes the record runs the action; everyone
+        # else (second press, double-click race) gets "Already handled".
+        taken = await self.button_store.take(record_id)
+        if taken is None or taken.action != action:
+            await self._respond_interaction(interaction, ALREADY_HANDLED_REPLY)
+            return
+
+        result: ButtonOutcome | str | None = None
+        handler = self._button_handlers.get(action)
+        if handler is not None:
+            try:
+                result = await handler(taken, interaction)
+            except Exception:  # noqa: BLE001 - never let the gateway die
+                # The record is already claimed: a failed press is not
+                # retried, and its buttons are retired like any other.
+                _LOGGER.exception("Button action %s failed", action)
+                result = BUTTON_ERROR_REPLY
+        if result is None:
+            payload_text = taken.payload.get("response_text")
+            result = payload_text if isinstance(payload_text, str) else HANDLED_REPLY
+        outcome = (
+            result
+            if isinstance(result, ButtonOutcome)
+            else ButtonOutcome(outcome=result, ephemeral=result)
+        )
+        if outcome.retire and not taken.multi_use:
+            await self._retire_interaction_message(interaction, outcome.outcome)
+        if outcome.ephemeral:
+            await self._respond_interaction(interaction, outcome.ephemeral)
+
+    async def _ack_interaction(self, interaction: discord.Interaction) -> None:
+        try:
+            response = getattr(interaction, "response", None)
+            if response is None or response.is_done():
+                return
+            await response.defer(ephemeral=True)
+        except Exception:  # noqa: BLE001 - ack is best-effort
+            _LOGGER.debug("Failed to acknowledge interaction", exc_info=True)
+
+    async def _respond_interaction(
+        self, interaction: discord.Interaction, text: str
+    ) -> None:
+        """Send an ephemeral reply, via followup when already acknowledged."""
+        try:
+            response = getattr(interaction, "response", None)
+            if response is not None and not response.is_done():
+                await response.send_message(
+                    text,
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
+            followup = getattr(interaction, "followup", None)
+            if followup is not None:
+                await followup.send(
+                    text,
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        except Exception:  # noqa: BLE001 - a failed reply must not kill the bot
+            _LOGGER.warning("Failed to reply to interaction", exc_info=True)
+
+    async def _retire_interaction_message(
+        self, interaction: discord.Interaction, outcome: str | None
+    ) -> None:
+        """Drop the message's buttons and append the outcome line.
+
+        The original text (an alert, a question) stays; only the outcome is
+        added under it.
+        """
+        try:
+            message = getattr(interaction, "message", None)
+            if message is not None and hasattr(message, "edit"):
+                await message.edit(
+                    content=retired_content(getattr(message, "content", None), outcome),
+                    view=None,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        except Exception:  # noqa: BLE001 - editing is best-effort
+            _LOGGER.debug("Failed to edit interaction message", exc_info=True)
 
     def _interaction_scope(
         self, interaction: discord.Interaction

@@ -76,6 +76,8 @@ async def test_options_settings_updates(hass: HomeAssistant):
             {CONF_AGENT_ID: "conversation.ollama", CONF_CHANNELS: ["555"]},
         )
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    # Let the reload the options save schedules finish inside the test.
+    await hass.async_block_till_done()
     assert entry.options[CONF_CHANNELS] == ["555"]
 
 
@@ -94,6 +96,8 @@ async def test_options_settings_conversation_scope(hass: HomeAssistant):
             {CONF_AGENT_ID: "conversation.ollama", CONF_CONVERSATION_SCOPE: "user"},
         )
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    # Let the reload the options save schedules finish inside the test.
+    await hass.async_block_till_done()
     assert entry.options[CONF_CONVERSATION_SCOPE] == "user"
 
 
@@ -114,6 +118,8 @@ async def test_add_user_mapping(hass: HomeAssistant):
             {"discord_user_id": "7", CONF_FALLBACK_USER: "ha-user-1"},
         )
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    # Let the reload the options save schedules finish inside the test.
+    await hass.async_block_till_done()
     assert entry.options[CONF_USER_MAP] == {"7": "ha-user-1"}
 
 
@@ -155,6 +161,8 @@ async def test_remove_user_mapping(hass: HomeAssistant):
         result["flow_id"], {"discord_user_id": "7"}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    # Let the reload the options save schedules finish inside the test.
+    await hass.async_block_till_done()
     assert entry.options[CONF_USER_MAP] == {"8": "ha-user-2"}
 
 
@@ -173,6 +181,8 @@ async def test_add_room_channel(hass: HomeAssistant):
             result["flow_id"], {"channel_id": "555", "device_id": "dev-den"}
         )
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    # Let the reload the options save schedules finish inside the test.
+    await hass.async_block_till_done()
     assert entry.options[CONF_ROOM_MAP] == {"555": "dev-den"}
 
 
@@ -223,6 +233,8 @@ async def test_add_agent_for_user(hass: HomeAssistant):
         {"discord_user_id": "7", CONF_AGENT_ID: "conversation.kids"},
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    # Let the reload the options save schedules finish inside the test.
+    await hass.async_block_till_done()
     assert entry.options[CONF_AGENT_MAP_USER] == {"7": "conversation.kids"}
 
 
@@ -258,6 +270,8 @@ async def test_remove_agent_for_user(hass: HomeAssistant):
         result["flow_id"], {"discord_user_id": "7"}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    # Let the reload the options save schedules finish inside the test.
+    await hass.async_block_till_done()
     assert entry.options[CONF_AGENT_MAP_USER] == {"8": "conversation.x"}
 
 
@@ -287,6 +301,8 @@ async def test_add_agent_for_channel(hass: HomeAssistant):
             {"channel_id": "555", CONF_AGENT_ID: "conversation.kids"},
         )
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    # Let the reload the options save schedules finish inside the test.
+    await hass.async_block_till_done()
     assert entry.options[CONF_AGENT_MAP_CHANNEL] == {"555": "conversation.kids"}
 
 
@@ -325,6 +341,8 @@ async def test_remove_agent_for_channel(hass: HomeAssistant):
         result["flow_id"], {"channel_id": "555"}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    # Let the reload the options save schedules finish inside the test.
+    await hass.async_block_till_done()
     assert entry.options[CONF_AGENT_MAP_CHANNEL] == {}
 
 
@@ -363,6 +381,8 @@ async def test_add_channel_idle_override(hass: HomeAssistant):
             result["flow_id"], {"channel_id": "555", "idle_minutes": 45}
         )
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    # Let the reload the options save schedules finish inside the test.
+    await hass.async_block_till_done()
     assert entry.options[CONF_CHANNEL_IDLE_MINUTES] == {"555": 45}
 
 
@@ -431,6 +451,8 @@ async def test_remove_note_lists_and_removes(hass: HomeAssistant):
         result["flow_id"], {"note_key": "7:1"}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    # Let the reload the options save schedules finish inside the test.
+    await hass.async_block_till_done()
     fresh = NotesStore(hass, entry.entry_id)
     assert await fresh.async_notes_for(7) == ["all the lights means all lights"]
     assert await fresh.async_notes_for(8) == ["someone else"]

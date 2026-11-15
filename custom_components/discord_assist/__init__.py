@@ -18,6 +18,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.device_registry import DeviceEntryType
 
 from .bot import DiscordAssistClient
+from .buttons import ButtonStore
 from .const import (
     CONF_PLACEHOLDER_DELAY,
     CONF_TOKEN,
@@ -52,6 +53,7 @@ class RuntimeData:
     timers: TimerTracker | None = None
     notes_store: NotesStore | None = None
     recent_errors: RecentErrors = field(default_factory=RecentErrors)
+    button_store: ButtonStore | None = None
 
 
 type DiscordConfigEntry = ConfigEntry[RuntimeData]
@@ -126,10 +128,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
     )
 
     recent_errors = RecentErrors()
+    button_store = ButtonStore(hass, entry.entry_id)
+    await button_store.async_load()
     client = DiscordAssistClient(
         hass,
         router,
         signal_connection(entry.entry_id),
+        button_store=button_store,
         placeholder_delay=float(
             entry.options.get(CONF_PLACEHOLDER_DELAY, DEFAULT_PLACEHOLDER_DELAY)
         ),
@@ -178,6 +183,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         notes_store=notes_store,
         device_id=device.id,
         timers=timers,
+        button_store=button_store,
     )
 
     # Permissions phase B: expose the scoped LLM API so agents serving
@@ -227,6 +233,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Clean up repair issues and stored notes when the entry is deleted."""
     await NotesStore(hass, entry.entry_id).async_remove()
+    await ButtonStore(hass, entry.entry_id).async_remove()
     hass.data.get(DOMAIN, {}).pop(f"timers_{entry.entry_id}", None)
     for kind in (
         ISSUE_NO_AUTHORIZED_USERS,
