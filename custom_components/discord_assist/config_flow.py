@@ -40,6 +40,7 @@ from .const import (
     CONF_ALLOWLIST,
     CONF_BOT_ID,
     CONF_CHANNELS,
+    CONF_CONVERSATION_SCOPE,
     CONF_FALLBACK_USER,
     CONF_IDLE_MINUTES,
     CONF_LANGUAGE,
@@ -50,7 +51,10 @@ from .const import (
     CONF_SPEAKER_CONTEXT,
     CONF_TOKEN,
     CONF_USER_MAP,
+    CONVERSATION_SCOPE_CHANNEL,
+    CONVERSATION_SCOPE_USER,
     DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_CONVERSATION_SCOPE,
     DEFAULT_IDLE_MINUTES,
     DEFAULT_PREFER_LOCAL,
     DEFAULT_RESPOND_DMS,
@@ -116,6 +120,23 @@ def build_config_schema(channel_options: list[SelectOptionDict]) -> vol.Schema:
                     step=1,
                     mode=NumberSelectorMode.BOX,
                     unit_of_measurement="s",
+                )
+            ),
+            vol.Optional(
+                CONF_CONVERSATION_SCOPE, default=DEFAULT_CONVERSATION_SCOPE
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(
+                            value=CONVERSATION_SCOPE_CHANNEL,
+                            label="Channel: one shared conversation per channel",
+                        ),
+                        SelectOptionDict(
+                            value=CONVERSATION_SCOPE_USER,
+                            label="User: one conversation per person in each channel",
+                        ),
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
                 )
             ),
         }

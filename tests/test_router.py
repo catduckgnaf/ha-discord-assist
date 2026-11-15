@@ -13,9 +13,11 @@ from custom_components.discord_assist.const import (
     CONF_AGENT_ID,
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
+    CONF_CONVERSATION_SCOPE,
     CONF_PREFER_LOCAL,
     CONF_ROOM_MAP,
     CONF_USER_MAP,
+    CONVERSATION_SCOPE_USER,
     LOCAL_AGENT_ID,
 )
 from custom_components.discord_assist.conversation_cache import ConversationCache
@@ -51,6 +53,94 @@ def _router(**overrides):
 def test_make_conversation_key_dm_vs_channel():
     assert make_conversation_key(is_dm=True, channel_id=5, author_id=9) == "dm:9"
     assert make_conversation_key(is_dm=False, channel_id=5, author_id=9) == "channel:5"
+
+
+def test_make_conversation_key_user_scope():
+    # Each author gets their own key in a shared channel.
+    assert (
+        make_conversation_key(
+            is_dm=False, channel_id=5, author_id=9, scope=CONVERSATION_SCOPE_USER
+        )
+        == "channel:5:user:9"
+    )
+    assert (
+        make_conversation_key(
+            is_dm=False, channel_id=5, author_id=10, scope=CONVERSATION_SCOPE_USER
+        )
+        == "channel:5:user:10"
+    )
+    # DMs are keyed per user under both scopes.
+    assert (
+        make_conversation_key(
+            is_dm=True, channel_id=5, author_id=9, scope=CONVERSATION_SCOPE_USER
+        )
+        == "dm:9"
+    )
+    # The channel scope ignores the author, as before.
+    assert (
+        make_conversation_key(is_dm=False, channel_id=5, author_id=9, scope="channel")
+        == "channel:5"
+    )
+
+
+def test_router_conversation_key_uses_scope():
+    default = _router()
+    assert (
+        default.conversation_key(is_dm=False, channel_id=5, author_id=9) == "channel:5"
+    )
+    assert default.conversation_key(is_dm=True, channel_id=5, author_id=9) == "dm:9"
+    per_user = _router(conversation_scope=CONVERSATION_SCOPE_USER)
+    assert (
+        per_user.conversation_key(is_dm=False, channel_id=5, author_id=9)
+        == "channel:5:user:9"
+    )
+    assert per_user.conversation_key(is_dm=True, channel_id=5, author_id=9) == "dm:9"
+
+
+async def _echo_converse(hass, text, conversation_id, context, **kwargs):
+    """Continue the passed conversation, else start one named for the user."""
+    return SimpleNamespace(
+        response=SimpleNamespace(speech={"plain": {"speech": "ok"}}),
+        conversation_id=conversation_id or f"conv-{context.user_id}",
+    )
+
+
+async def test_process_user_scope_separates_conversation_ids():
+    router = _router(
+        user_map={7: "ha-a", 8: "ha-b"}, conversation_scope=CONVERSATION_SCOPE_USER
+    )
+    key_a = router.conversation_key(is_dm=False, channel_id=111, author_id=7)
+    key_b = router.conversation_key(is_dm=False, channel_id=111, author_id=8)
+    assert key_a != key_b
+    with patch(_CONVERSE, new=AsyncMock(side_effect=_echo_converse)) as converse:
+        await router.process(
+            text="turn on the light", discord_user_id=7, conversation_key=key_a
+        )
+        await router.process(
+            text="turn it off again", discord_user_id=8, conversation_key=key_b
+        )
+        await router.process(
+            text="and dim it", discord_user_id=7, conversation_key=key_a
+        )
+    # Each user's first turn starts fresh; only their own turns continue.
+    seen = [call.args[2] for call in converse.call_args_list]
+    assert seen == [None, None, "conv-ha-a"]
+
+
+async def test_process_channel_scope_shares_conversation_id():
+    router = _router(user_map={7: "ha-a", 8: "ha-b"})
+    key = router.conversation_key(is_dm=False, channel_id=111, author_id=7)
+    assert key == router.conversation_key(is_dm=False, channel_id=111, author_id=8)
+    with patch(_CONVERSE, new=AsyncMock(side_effect=_echo_converse)) as converse:
+        await router.process(
+            text="turn on the light", discord_user_id=7, conversation_key=key
+        )
+        await router.process(
+            text="turn it off again", discord_user_id=8, conversation_key=key
+        )
+    # The second speaker continues the first speaker's conversation.
+    seen = [call.args[2] for call in converse.call_args_list]
+    assert seen == [None, "conv-ha-a"]
 
 
 @pytest.mark.parametrize(
@@ -369,3 +459,24 @@ def test_from_entry_reads_new_options():
     assert router.prefer_local is True
     assert router.agent_timeout == 30.0
     assert router.speaker_context is True
+
+
+def test_from_entry_conversation_scope():
+    from types import SimpleNamespace
+
+    base = {CONF_AGENT_ID: "conversation.ollama"}
+    default = ConversationRouter.from_entry(
+        object(), SimpleNamespace(options=dict(base))
+    )
+    assert default.conversation_scope == "channel"
+    per_user = ConversationRouter.from_entry(
+        object(),
+        SimpleNamespace(options={**base, CONF_CONVERSATION_SCOPE: "user"}),
+    )
+    assert per_user.conversation_scope == CONVERSATION_SCOPE_USER
+    # An unknown stored value falls back to the shared-channel default.
+    bogus = ConversationRouter.from_entry(
+        object(),
+        SimpleNamespace(options={**base, CONF_CONVERSATION_SCOPE: "bogus"}),
+    )
+    assert bogus.conversation_scope == "channel"

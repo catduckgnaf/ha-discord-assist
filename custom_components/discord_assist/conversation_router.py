@@ -21,6 +21,7 @@ from .const import (
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
     CONF_CHANNELS,
+    CONF_CONVERSATION_SCOPE,
     CONF_FALLBACK_USER,
     CONF_IDLE_MINUTES,
     CONF_LANGUAGE,
@@ -30,7 +31,10 @@ from .const import (
     CONF_ROOM_MAP,
     CONF_SPEAKER_CONTEXT,
     CONF_USER_MAP,
+    CONVERSATION_SCOPE_USER,
+    CONVERSATION_SCOPES,
     DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_CONVERSATION_SCOPE,
     DEFAULT_IDLE_MINUTES,
     DEFAULT_PREFER_LOCAL,
     DEFAULT_RESPOND_DMS,
@@ -94,9 +98,24 @@ def _clean_name(value: str | None) -> str | None:
     return cleaned[:_MAX_NAME_LENGTH] or None
 
 
-def make_conversation_key(*, is_dm: bool, channel_id: int, author_id: int) -> str:
-    """One conversation per DM (by user) or per channel."""
-    return f"dm:{author_id}" if is_dm else f"channel:{channel_id}"
+def make_conversation_key(
+    *,
+    is_dm: bool,
+    channel_id: int,
+    author_id: int,
+    scope: str = DEFAULT_CONVERSATION_SCOPE,
+) -> str:
+    """Conversation key for a message.
+
+    DMs are always per user. In a channel the scope decides: "channel"
+    (the default) shares one conversation per channel, "user" gives each
+    author their own conversation in the channel.
+    """
+    if is_dm:
+        return f"dm:{author_id}"
+    if scope == CONVERSATION_SCOPE_USER:
+        return f"channel:{channel_id}:user:{author_id}"
+    return f"channel:{channel_id}"
 
 
 def resolve_ha_user_id(
@@ -137,6 +156,7 @@ class ConversationRouter:
     speaker_context: bool = DEFAULT_SPEAKER_CONTEXT
     prefer_local: bool = DEFAULT_PREFER_LOCAL
     agent_timeout: float = DEFAULT_AGENT_TIMEOUT
+    conversation_scope: str = DEFAULT_CONVERSATION_SCOPE
     turns: TurnLocks = field(default_factory=TurnLocks)
 
     @property
@@ -159,6 +179,15 @@ class ConversationRouter:
         ):
             return None
         return resolve_ha_user_id(self.user_map, self.fallback_user, discord_user_id)
+
+    def conversation_key(self, *, is_dm: bool, channel_id: int, author_id: int) -> str:
+        """Conversation key for a message under this router's scope."""
+        return make_conversation_key(
+            is_dm=is_dm,
+            channel_id=channel_id,
+            author_id=author_id,
+            scope=self.conversation_scope,
+        )
 
     def device_for(self, channel_id: int | None, parent_id: int | None) -> str | None:
         """Device standing in for the room a channel (or its thread) represents."""
@@ -290,6 +319,14 @@ class ConversationRouter:
     @classmethod
     def from_entry(cls, hass: HomeAssistant, entry: ConfigEntry) -> ConversationRouter:
         opts = entry.options
+        scope = opts.get(CONF_CONVERSATION_SCOPE, DEFAULT_CONVERSATION_SCOPE)
+        if scope not in CONVERSATION_SCOPES:
+            _LOGGER.warning(
+                "Ignoring unknown conversation scope %r; using %r",
+                scope,
+                DEFAULT_CONVERSATION_SCOPE,
+            )
+            scope = DEFAULT_CONVERSATION_SCOPE
         return cls(
             hass=hass,
             agent_id=opts.get(CONF_AGENT_ID),
@@ -307,4 +344,5 @@ class ConversationRouter:
             speaker_context=opts.get(CONF_SPEAKER_CONTEXT, DEFAULT_SPEAKER_CONTEXT),
             prefer_local=opts.get(CONF_PREFER_LOCAL, DEFAULT_PREFER_LOCAL),
             agent_timeout=float(opts.get(CONF_AGENT_TIMEOUT, DEFAULT_AGENT_TIMEOUT)),
+            conversation_scope=scope,
         )

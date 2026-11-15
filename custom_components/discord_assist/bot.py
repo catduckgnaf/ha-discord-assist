@@ -8,12 +8,7 @@ import discord
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from .conversation_router import (
-    AgentTimeout,
-    ConversationRouter,
-    MessageContext,
-    make_conversation_key,
-)
+from .conversation_router import AgentTimeout, ConversationRouter, MessageContext
 from .text_utils import chunk_message, strip_self_mention
 
 _LOGGER = logging.getLogger(__name__)
@@ -79,7 +74,7 @@ class DiscordAssistClient(discord.Client):
         if not text:
             return
 
-        key = make_conversation_key(
+        key = self.router.conversation_key(
             is_dm=is_dm, channel_id=message.channel.id, author_id=message.author.id
         )
         where = MessageContext(

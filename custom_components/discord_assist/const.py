@@ -23,6 +23,13 @@ CONF_SPEAKER_CONTEXT = "speaker_context"
 CONF_PREFER_LOCAL = "prefer_local"
 CONF_AGENT_TIMEOUT = "agent_timeout"
 CONF_ROOM_MAP = "room_map"
+CONF_CONVERSATION_SCOPE = "conversation_scope"
+
+# Conversation keying in channels: one shared conversation per channel, or
+# one per user in each channel. DMs are always keyed per user.
+CONVERSATION_SCOPE_CHANNEL = "channel"
+CONVERSATION_SCOPE_USER = "user"
+CONVERSATION_SCOPES = (CONVERSATION_SCOPE_CHANNEL, CONVERSATION_SCOPE_USER)
 
 DEFAULT_RESPOND_DMS = True
 DEFAULT_RESPOND_MENTIONS = True
@@ -30,6 +37,7 @@ DEFAULT_IDLE_MINUTES = 15
 DEFAULT_SPEAKER_CONTEXT = True
 DEFAULT_PREFER_LOCAL = False
 DEFAULT_AGENT_TIMEOUT = 60
+DEFAULT_CONVERSATION_SCOPE = CONVERSATION_SCOPE_CHANNEL
 
 # Home Assistant's built-in intent agent, tried first when prefer_local is on.
 LOCAL_AGENT_ID = "conversation.home_assistant"
