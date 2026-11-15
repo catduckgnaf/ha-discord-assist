@@ -251,6 +251,11 @@ The event is fired with the presser's Home Assistant user as its context, so aut
 > **Warning:** the automation does the action, so Home Assistant permissions apply to the automation, not the presser. An "Unlock front door" button is exactly as safe as the automation's own conditions. Check the presser's `ha_user_id` in a condition when it matters, and do not treat a button press by itself as approval for a sensitive action.
 
 Buttons are posted through the `discord_assist.send_message` action; each button is a record in the integration's persistent button store, posted with a `da:act:<record_id>` custom id that the bot's button dispatcher routes to this event.
+
+### Buttons check state first
+
+A button can name the entities it acts on (`entity_ids`). Their state is captured when the message is posted and re-read when someone presses: if any of them changed (or disappeared), the press is refused with an ephemeral "Nothing changed: ..." explanation, no event fires, and the buttons are removed from the message. A state that changed and changed back since the post also counts, except for buttons posted before Home Assistant last restarted, since a restart resets that timestamp; for those only the state itself is compared.
+
 ## Per-user and per-channel agents
 
 One agent does not have to serve everyone. In options, choose **Use a specific agent in a channel** or **Use a specific agent for a Discord user** and pick a conversation agent, for example local-only Assist for a kids' channel and an LLM for the family channel. Precedence is: the user's agent, then the channel's agent, then the agent chosen in the main settings. Threads use their parent channel's agent. Each agent keeps its own conversation in a channel, so switching agents never mixes conversation history. "Built-in commands first" still applies on top of the chosen agent.
