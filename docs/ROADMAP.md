@@ -185,16 +185,15 @@ User mapping beats role mapping; deny beats allow; no match means ignored
 2. **Gatekeeping before the agent (hard).** Channel, DM, quiet hours, rate
    limits, and agent choice are checked by Discord Assist before anything
    reaches an agent.
-3. **Scoped tools (hard, needs a compatible agent).** Discord Assist registers
-   its own Home Assistant LLM API. For each request it builds the tool list
-   and the entity list from the speaker's profile: only allowed areas, domains
-   and entities are visible or callable. The model cannot call what it is not
-   given. Works with agents that support Home Assistant LLM APIs (OpenAI,
-   Anthropic, Google, Ollama, OpenRouter). **Extended OpenAI Conversation does
-   not use LLM APIs**, so tier 3 needs an agent change; with it, only tiers 1,
-   2 and 4 apply.
-4. **Approval buttons for sensitive actions (hard with tier 3).** A scoped tool
-   for a `confirm_domains` action does not execute; it posts Approve / Deny
+3. **Scoped tools (hard, with the bundled agent).** Discord Assist's own
+   agent builds each request's tool list from the speaker's profile and
+   checks every call's arguments: only allowed tools, areas, domains and
+   entities are visible or callable. The model cannot call what it is not
+   given. Third-party agents such as Extended OpenAI Conversation build their
+   own tools, so with them only tiers 1, 2 and 5 apply. See the decision
+   below and #40.
+4. **Approval buttons for sensitive actions (hard with tier 3).** A call to a
+   `confirm` tool or target does not execute; it posts Approve / Deny
    buttons, and only the requester (or an approver) can press them. Approvers
    can be a separate list, as in Print Handy.
 5. **Audit (always).** Every Discord-initiated action is logged to the
@@ -205,12 +204,28 @@ User mapping beats role mapping; deny beats allow; no match means ignored
 | Phase | Ships | Depends on |
 | --- | --- | --- |
 | A | Profiles in options, user and role mapping, per-profile HA user, channel and DM rules, quiet hours, rate limit, per-profile agent, audit event | nothing |
-| B | Scoped LLM API (areas, domains, entity allow and deny, read-only tools) | an LLM-API-capable agent |
-| C | Approval buttons for sensitive domains, approver list | B and the button dispatcher (suggestion 9) |
+| B | Scoped tools per profile (areas, domains, entity allow and deny, read-only tools) | the bundled agent (#40) |
+| C | Approval buttons for sensitive tools, approver list | B and the button dispatcher (suggestion 9) |
+
+### Decision: a bundled agent with ha-mcp tools (2026-11-15)
+
+Tiers 3 and 4 will not depend on a third-party agent. Discord Assist ships its
+own conversation agent (OpenAI-compatible model setting, so Luna's model keeps
+working) and uses [ha-mcp](https://github.com/homeassistant-ai/ha-mcp) as its
+main tool layer. Every tool call passes one gate in Discord Assist: the
+speaker's profile decides which tools the model is given, arguments are
+checked against the profile's areas, domains and entities, and sensitive calls
+wait for Approve / Deny buttons. ha-mcp acts as one administrator account, so
+this gate is the security boundary for ha-mcp tools; ha-mcp's own Read Only
+Mode, tool toggles and policies stay on as a global floor. Optional: Home
+Assistant's Device control API as the speaker's own user. Design, transport
+choice (in-process ha-mcp LLM API or MCP client to the app) and open questions
+are in issue #40.
 
 ### Open questions
 
-- Which agent should Luna run behind? Tier 3 needs an agent that supports Home
+- ~~Which agent should Luna run behind?~~ Decided: the bundled agent above (#36, #40).
+- (Original question) Tier 3 needs an agent that supports Home
   Assistant LLM APIs; Extended OpenAI Conversation does not.
 - Discord roles need the Server Members intent to read member roles reliably.
   It is a privileged intent; acceptable for a private server.
@@ -230,4 +245,5 @@ issue.
 6. Reply as a reply (8), code-block-safe chunking (15).
 7. Agent tuning guide in the docs (30).
 
-Permissions phase A and the button dispatcher are the natural 0.4.0.
+0.4.0: permissions phase A (#12), the button dispatcher (#13, #14), and the
+bundled agent with ha-mcp tools (#40), which delivers phases B and C.
