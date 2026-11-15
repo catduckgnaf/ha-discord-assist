@@ -122,12 +122,12 @@ The event data is:
 | Field | Description |
 |-------|-------------|
 | `text` | The message text, with the bot's own mention stripped. Omitted entirely when **Exclude message text from events** is on |
-| `channel_id` | Discord channel (or DM) ID |
+| `channel_id` | Discord channel (or DM) ID, as a string |
 | `channel_name` | Channel name, or `null` for direct messages |
 | `is_dm` | Whether the message was a direct message |
-| `discord_user_id` | Discord user ID of the sender |
+| `discord_user_id` | Discord user ID of the sender, as a string |
 | `ha_user_id` | Home Assistant user the sender acts as; the event's context carries the same user |
-| `message_id` | Discord message ID |
+| `message_id` | Discord message ID, as a string |
 | `config_entry_id` | The Discord Assist config entry that received the message |
 
 Example: turn on a light when someone posts "movie time" in a channel, without asking the agent:
@@ -139,7 +139,7 @@ automation:
       - trigger: event
         event_type: discord_assist_message
         event_data:
-          channel_id: 123456789012345678
+          channel_id: "123456789012345678"
     conditions:
       - condition: template
         value_template: "{{ 'movie time' in trigger.event.data.text | lower }}"

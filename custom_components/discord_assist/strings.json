@@ -22,7 +22,10 @@
           "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
           "event_exclude_text": "Exclude message text from the discord_assist_message event (event data is stored by the recorder)",
           "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
-          "agent_timeout": "Give up on the agent after this many seconds"
+          "agent_timeout": "Give up on the agent after this many seconds",
+          "rate_limit_per_minute": "Max requests per Discord user per minute (0 = no limit)",
+          "rate_limit_burst": "Requests a Discord user may send in a burst before the limit applies",
+          "placeholder_delay": "Show a working placeholder after this many seconds"
         }
       },
       "reauth_confirm": {
@@ -83,7 +86,10 @@
           "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
           "event_exclude_text": "Exclude message text from the discord_assist_message event (event data is stored by the recorder)",
           "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
-          "agent_timeout": "Give up on the agent after this many seconds"
+          "agent_timeout": "Give up on the agent after this many seconds",
+          "rate_limit_per_minute": "Max requests per Discord user per minute (0 = no limit)",
+          "rate_limit_burst": "Requests a Discord user may send in a burst before the limit applies",
+          "placeholder_delay": "Show a working placeholder after this many seconds"
         }
       },
       "add_user_map": {
