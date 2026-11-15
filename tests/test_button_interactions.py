@@ -1,12 +1,19 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
+
 from custom_components.discord_assist.bot import (
     ALREADY_HANDLED_REPLY,
     NOT_ALLOWED_REPLY,
     DiscordAssistClient,
 )
-from custom_components.discord_assist.buttons import ButtonStore
+from custom_components.discord_assist.buttons import (
+    ButtonOutcome,
+    ButtonSpec,
+    ButtonStore,
+    async_send_with_buttons,
+)
 from tests.test_buttons import Clock, FakeStore
 
 
@@ -28,6 +35,7 @@ class FakeResponse:
 
 def _interaction(custom_id, user_id=7):
     return SimpleNamespace(
+        type=discord.InteractionType.component,
         data={"custom_id": custom_id} if custom_id is not None else {},
         user=SimpleNamespace(id=user_id),
         response=FakeResponse(),
@@ -173,3 +181,75 @@ async def test_press_without_handler_uses_payload_response_text(monkeypatch):
     await client.on_interaction(interaction)
     assert _followup_texts(interaction) == ["Lights on."]
     assert await store.peek(record.record_id) is None
+
+
+async def test_outcome_keeps_message_text_and_appends_outcome(monkeypatch):
+    store, record = await _recorded_store()
+
+    async def handler(taken, interaction):
+        return ButtonOutcome(outcome="Unlocked by Catduck", ephemeral=None)
+
+    client = _client(
+        monkeypatch, store=store, router=_router(), handlers={"confirm": handler}
+    )
+    interaction = _interaction(record.custom_id)
+    interaction.message.content = "Front door: someone is here"
+    await client.on_interaction(interaction)
+    kwargs = interaction.message.edit.await_args.kwargs
+    assert kwargs["content"] == "Front door: someone is here\nUnlocked by Catduck"
+    assert kwargs["view"] is None
+    interaction.followup.send.assert_not_awaited()
+
+
+async def test_pressing_one_button_claims_its_siblings(monkeypatch):
+    store = ButtonStore(store=FakeStore(), ttl_seconds=60, now=Clock())
+    yes = await store.record("confirm", group_id="g1")
+    no = await store.record("confirm", group_id="g1")
+    other = await store.record("confirm", group_id="g2")
+    assert (await store.take(yes.record_id)).record_id == yes.record_id
+    assert await store.take(no.record_id) is None
+    assert await store.peek(other.record_id) is not None
+
+
+async def test_multi_use_record_survives_presses(monkeypatch):
+    store, record = await _recorded_store(multi_use=True)
+    handler = AsyncMock(return_value="Sent.")
+    client = _client(
+        monkeypatch, store=store, router=_router(), handlers={"confirm": handler}
+    )
+    first = _interaction(record.custom_id)
+    second = _interaction(record.custom_id)
+    await client.on_interaction(first)
+    await client.on_interaction(second)
+    assert handler.await_count == 2
+    # A multi-use button keeps its buttons.
+    first.message.edit.assert_not_awaited()
+
+
+async def test_send_with_buttons_binds_and_stops_the_view():
+    store = ButtonStore(store=FakeStore(), ttl_seconds=60, now=Clock())
+    sent = []
+
+    async def send(content, **kwargs):
+        message = SimpleNamespace(id=5000 + len(sent), content=content, **kwargs)
+        sent.append(message)
+        return message
+
+    channel = SimpleNamespace(id=111)
+    messages = await async_send_with_buttons(
+        store,
+        channel,
+        "word\n" * 1000,
+        [ButtonSpec("Yes", "confirm"), ButtonSpec("No", "confirm")],
+        send=send,
+    )
+    assert len(messages) > 1
+    assert all(not hasattr(m, "view") for m in messages[:-1])
+    view = messages[-1].view
+    # Stopped, so discord.py does not keep it in its view store forever.
+    assert view.is_finished()
+    ids = [item.custom_id for item in view.children]
+    records = [await store.peek(cid.split(":")[2]) for cid in ids]
+    assert {r.message_id for r in records} == {messages[-1].id}
+    assert {r.channel_id for r in records} == {111}
+    assert len({r.group_id for r in records}) == 1
