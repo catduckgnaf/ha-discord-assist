@@ -1,8 +1,10 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 
+import custom_components.discord_assist.bot as bot_module
 from custom_components.discord_assist.bot import TIMEOUT_REPLY, DiscordAssistClient
 from custom_components.discord_assist.conversation_router import AgentTimeout
 
@@ -25,10 +27,7 @@ def _message(
         channel = MagicMock(spec=discord.TextChannel)
     channel.id = channel_id
     channel.send = AsyncMock()
-    typing_cm = MagicMock()
-    typing_cm.__aenter__ = AsyncMock()
-    typing_cm.__aexit__ = AsyncMock(return_value=False)
-    channel.typing = MagicMock(return_value=typing_cm)
+    channel.typing = AsyncMock()
     msg = SimpleNamespace(
         content=content,
         channel=channel,
@@ -109,13 +108,10 @@ async def test_on_message_replies_when_typing_fails(monkeypatch):
     client = _client(router, monkeypatch)
 
     msg = _message("<@999> lights?", mentions=[SimpleNamespace(id=999)])
-    # Make the typing context manager raise on enter
-    typing_cm = MagicMock()
-    typing_cm.__aenter__ = AsyncMock(
+    # Fake channel whose typing raises every time it is triggered
+    msg.channel.typing = AsyncMock(
         side_effect=discord.HTTPException(MagicMock(), "forbidden")
     )
-    typing_cm.__aexit__ = AsyncMock(return_value=False)
-    msg.channel.typing = MagicMock(return_value=typing_cm)
 
     await client.on_message(msg)
 
@@ -195,22 +191,49 @@ async def test_long_reply_only_first_piece_is_a_reply(monkeypatch):
     assert all(c.kwargs == {} for c in calls[1:])
 
 
-async def test_typing_failure_after_answer_does_not_rerun_agent(monkeypatch):
-    """If the typing indicator fails on exit, the agent must not run again."""
+async def test_typing_stops_at_cap_while_agent_still_working(monkeypatch):
+    """The indicator stops after the cap even if the agent is still working."""
+    monkeypatch.setattr(bot_module, "TYPING_CAP_SECONDS", 0.03)
+    monkeypatch.setattr(bot_module, "TYPING_REFRESH_SECONDS", 0.01)
     router = MagicMock()
     router.should_respond.return_value = True
-    router.process = AsyncMock(return_value="Unlocked.")
+    calls_when_agent_finished = []
+
+    async def slow_process(**kwargs):
+        await asyncio.sleep(0.15)
+        calls_when_agent_finished.append(msg.channel.typing.await_count)
+        return "Done."
+
+    router.process = AsyncMock(side_effect=slow_process)
     client = _client(router, monkeypatch)
-    msg = _message("<@999> unlock", mentions=[SimpleNamespace(id=999)])
-    typing_cm = MagicMock()
-    typing_cm.__aenter__ = AsyncMock()
-    typing_cm.__aexit__ = AsyncMock(
-        side_effect=discord.HTTPException(MagicMock(), "gone")
-    )
-    msg.channel.typing = MagicMock(return_value=typing_cm)
+    msg = _message("<@999> slow", mentions=[SimpleNamespace(id=999)])
     await client.on_message(msg)
+
     router.process.assert_awaited_once()
-    assert _first_send(msg).args[0] == "Unlocked."
+    assert _first_send(msg).args[0] == "Done."
+    # Refreshing every 0.01s for the agent's 0.15s would be ~15 triggers;
+    # the 0.03s cap bounds it to a handful, and none happen after the cap.
+    assert 1 <= calls_when_agent_finished[0] <= 5
+    assert msg.channel.typing.await_count == calls_when_agent_finished[0]
+
+
+async def test_typing_stops_when_answer_is_ready(monkeypatch):
+    """Typing is cancelled once the reply is ready, well before the cap."""
+    router = MagicMock()
+    router.should_respond.return_value = True
+
+    async def quick_process(**kwargs):
+        await asyncio.sleep(0.01)
+        return "Quick."
+
+    router.process = AsyncMock(side_effect=quick_process)
+    client = _client(router, monkeypatch)
+    msg = _message("<@999> quick", mentions=[SimpleNamespace(id=999)])
+    await client.on_message(msg)
+    await asyncio.sleep(0.05)
+    router.process.assert_awaited_once()
+    assert msg.channel.typing.await_count == 1
+    assert _first_send(msg).args[0] == "Quick."
 
 
 async def test_dm_has_no_channel_name(monkeypatch):

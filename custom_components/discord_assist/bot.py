@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import discord
@@ -21,6 +22,35 @@ _LOGGER = logging.getLogger(__name__)
 ERROR_REPLY = "Sorry, I hit an error talking to Home Assistant."
 EMPTY_REPLY = "(no response)"
 TIMEOUT_REPLY = "Sorry, Home Assistant took too long to answer. Try again?"
+
+# Discord typing indicators expire after about 10 seconds, so there is no
+# point refreshing one for longer than that, however long the agent runs.
+TYPING_CAP_SECONDS = 10.0
+# discord.py's own typing loop re-sends every 5 seconds; mirror that.
+TYPING_REFRESH_SECONDS = 5.0
+
+
+async def _bounded_typing(channel: discord.abc.Messageable) -> None:
+    """Trigger typing on ``channel``, refreshing it until the cap.
+
+    Fire-and-forget helper: every error is logged at debug and ignored, so
+    a typing failure can never affect the reply. Cancellation (when the
+    answer is ready) stops the loop early.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + TYPING_CAP_SECONDS
+    while True:
+        try:
+            # The awaitable form of typing() sends a single trigger.
+            await channel.typing()
+        except Exception:  # noqa: BLE001 - typing is strictly best-effort
+            _LOGGER.debug("Typing indicator failed", exc_info=True)
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(TYPING_REFRESH_SECONDS, remaining))
+        if loop.time() >= deadline:
+            return
 
 
 class DiscordAssistClient(discord.Client):
@@ -122,32 +152,20 @@ class DiscordAssistClient(discord.Client):
     async def _answer(
         self, message: discord.Message, text: str, key: str, where: MessageContext
     ) -> str:
-        """Process the message, showing a typing indicator best-effort.
+        """Process the message, showing a capped typing indicator.
 
-        A typing-indicator failure must not block the actual reply, so fall
-        back to answering without it.
+        Typing runs in a background task bounded by TYPING_CAP_SECONDS and
+        is cancelled as soon as the answer is ready; it can never raise
+        into the answer path or re-run the agent.
         """
-
-        async def run() -> str:
+        typing_task = asyncio.create_task(_bounded_typing(message.channel))
+        try:
             return await self.router.process(
                 text=text,
                 discord_user_id=message.author.id,
                 conversation_key=key,
                 where=where,
             )
-
-        started = False
-        reply: str | None = None
-        try:
-            async with message.channel.typing():
-                started = True
-                reply = await run()
-        except discord.HTTPException:
-            # Retry only when the typing call failed before the agent ran;
-            # never run the agent (and its actions) twice.
-            if reply is not None:
-                return reply
-            if started:
-                raise
-            return await run()
-        return reply
+        finally:
+            typing_task.cancel()
+            await asyncio.gather(typing_task, return_exceptions=True)
