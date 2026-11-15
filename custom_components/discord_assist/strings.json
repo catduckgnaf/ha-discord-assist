@@ -83,10 +83,10 @@
           "agent_allowed_tools": "Allowed tools (blank = all offered tools)",
           "agent_owner_tools": "Owner tools (dangerous tools allowed for owner users)",
           "agent_owner_users": "Owner Home Assistant users",
-          "agent_confirm_tools": "Tools that require approval (tool name or domain:<domain>)"
+          "agent_confirm_tools": "Tools that require approval (a tool name, or domain: followed by a domain)"
         },
         "data_description": {
-          "agent_base_url": "Base URL of an OpenAI-compatible endpoint, for example http://localhost:1234/v1. Chat completions are posted to <base URL>/chat/completions.",
+          "agent_base_url": "Base URL of an OpenAI-compatible endpoint, for example http://localhost:1234/v1. Chat completions are posted to the base URL plus /chat/completions.",
           "agent_api_key": "Stored in the entry's data, never in its options. Leave blank to keep the current key.",
           "agent_llm_apis": "APIs whose tools the agent may use. The built-in Assist API runs as the speaker's Home Assistant user. ha-mcp's API runs as ha-mcp's administrator account; the tool gate is the boundary for it. An empty list means no tools.",
           "agent_allowed_tools": "When set, the model only ever sees these tools and nothing else can run.",
