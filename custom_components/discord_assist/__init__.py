@@ -32,6 +32,7 @@ from .const import (
     signal_connection,
 )
 from .conversation_router import ConversationRouter
+from .llm_api import async_setup_llm_api
 from .notes import NotesStore
 from .recent_errors import RecentErrors
 from .timers import TimerTracker
@@ -178,6 +179,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         device_id=device.id,
         timers=timers,
     )
+
+    # Permissions phase B: expose the scoped LLM API so agents serving
+    # Discord speakers can be limited to the speaker's scope.
+    async_setup_llm_api(hass, entry)
 
     async def _run() -> None:
         try:

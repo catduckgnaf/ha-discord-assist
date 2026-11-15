@@ -25,6 +25,14 @@ CONF_PREFER_LOCAL = "prefer_local"
 CONF_AGENT_TIMEOUT = "agent_timeout"
 CONF_PLACEHOLDER_DELAY = "placeholder_delay"
 CONF_ROOM_MAP = "room_map"
+# Per-HA-user tool scopes for the scoped LLM API (permissions phase B).
+# Shape: {ha_user_id: {"areas": [...], "domains": [...], "entities": [...],
+# "deny_entities": [...], "read_only": bool}} - see llm_api.resolve_scope.
+CONF_LLM_SCOPES = "llm_scopes"
+
+# The LLM API this integration registers for Discord-facing agents.
+LLM_API_ID = "discord_assist"
+LLM_API_NAME = "Discord Assist"
 CONF_TIMER_MENTION = "timer_mention"
 CONF_CHANNEL_IDLE_MINUTES = "channel_idle_minutes"
 CONF_CONVERSATION_SCOPE = "conversation_scope"

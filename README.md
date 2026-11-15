@@ -27,6 +27,7 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 - Camera snapshots: `snapshot <camera>` (or `show me <camera>`) attaches a current snapshot of an exposed camera you are allowed to view
 - Standing preferences: each user can save short notes ("all the lights means all lights") that are passed to the agent on every turn
 - Maps Discord user IDs to Home Assistant users so commands run as the right person
+- Registers a scoped LLM API ("Discord Assist") that limits an LLM agent's tools and entities per Home Assistant user
 - Fails closed: Discord users it cannot run as a Home Assistant user are ignored
 - Replies can never ping `@everyone`, roles, or users
 - Retries setup when Discord is unreachable and reloads if the gateway dies
@@ -249,6 +250,50 @@ Map a Discord user ID to a specific Home Assistant user so commands run with tha
 ### Fallback user
 
 Set **Fallback Home Assistant user** in options to control which HA user is used for Discord users who have no explicit mapping. Use a dedicated, least-privilege account for this.
+
+## Scoped LLM API
+
+Entity exposure to Assist is global: every exposed entity is visible to every user an agent runs as, and a prompt like "do not touch the locks" is a suggestion, not security. Discord Assist therefore registers its own Home Assistant LLM API, **Discord Assist**, which scopes what an LLM agent can see and do to the speaker.
+
+For each request, the API builds the tool list and the entity list from the Home Assistant user the request runs as:
+
+- Only entities exposed to the assistant, inside the user's scope, and readable by that user (their Home Assistant entity permissions) are listed in the prompt.
+- The tools are deliberately small: read one entity's state, turn an entity on, turn an entity off, and the current date and time.
+- Every tool call is re-checked against the scope and the user's permissions when it runs, not just when the list is built. A tool the model was never shown is still refused if it is called by name.
+- A read-only scope gets no state-changing tools at all.
+
+### Agent setup
+
+In your conversation agent's settings, select **Discord Assist** as the LLM API, and select **only** Discord Assist. Home Assistant merges every selected API into one tool set, so also selecting the built-in Assist API hands the model the full, unscoped Assist tools and defeats the scoping.
+
+Only agents that use Home Assistant LLM APIs can use this API. Agents that build their own tools (for example Extended OpenAI Conversation) cannot; with them, only the user mapping above and the agent's own settings limit what a speaker can do.
+
+### Scopes
+
+Scopes are stored in the integration's `llm_scopes` option, keyed by Home Assistant user ID:
+
+```json
+{
+  "llm_scopes": {
+    "<ha_user_id>": {
+      "areas": ["kitchen", "living_room"],
+      "domains": ["light", "switch"],
+      "entities": ["light.kitchen"],
+      "deny_entities": ["lock.front_door"],
+      "read_only": false
+    }
+  }
+}
+```
+
+- `areas`, `domains` and `entities` are allow lists of area IDs, entity domains and entity IDs. Leaving a key out means "no restriction on that dimension"; a present list, even an empty one, means "only these".
+- `deny_entities` always wins over the allow lists.
+- `read_only: true` removes the turn on/off tools entirely.
+- A malformed scope fails closed: it matches nothing.
+- A user with no scope entry is bounded only by entity exposure and their own Home Assistant entity permissions, which are always enforced underneath any scope.
+- Scopes are keyed by Home Assistant user, so every Discord user who acts as the fallback user shares the fallback user's scope.
+
+There is no options screen for scopes yet: until the access profiles from the permissions roadmap land, `llm_scopes` has to be written into the entry's options by hand, and without it nobody is scoped beyond exposure and their Home Assistant permissions (which allow every entity for a default non-admin user).
 
 ## Development
 
