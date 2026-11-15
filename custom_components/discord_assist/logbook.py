@@ -24,7 +24,9 @@ def async_describe_events(
         action = event.data.get("label") or event.data.get("action") or "a button"
         return {
             LOGBOOK_ENTRY_NAME: name,
-            LOGBOOK_ENTRY_MESSAGE: f"{name} pressed {action}",
+            # The logbook shows the name first, so the message must not
+            # repeat it ("Andrew pressed ...", not "Andrew Andrew pressed").
+            LOGBOOK_ENTRY_MESSAGE: f"pressed {action}",
         }
 
     async_describe_event(DOMAIN, EVENT_ACTION, async_describe_logbook_event)
