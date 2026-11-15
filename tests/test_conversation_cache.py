@@ -53,6 +53,43 @@ def test_set_none_clears_entry():
     assert cache.get("channel:1") is None
 
 
+def test_reset_clears_entry():
+    cache = ConversationCache(timedelta(minutes=15), now=_clock())
+    cache.set("channel:1", "conv-abc")
+    cache.reset("channel:1")
+    assert cache.get("channel:1") is None
+    # Resetting a key with nothing cached is not an error.
+    cache.reset("channel:1")
+
+
+def test_ttl_by_key_override_extends_one_key():
+    clock = _clock()
+    cache = ConversationCache(
+        timedelta(minutes=15),
+        now=clock,
+        ttl_by_key={"channel:1": timedelta(minutes=60)},
+    )
+    cache.set("channel:1", "conv-long")
+    cache.set("channel:2", "conv-default")
+    clock.advance(timedelta(minutes=16))
+    assert cache.get("channel:1") == "conv-long"
+    assert cache.get("channel:2") is None
+    clock.advance(timedelta(minutes=45))
+    assert cache.get("channel:1") is None
+
+
+def test_ttl_by_key_override_shortens_one_key():
+    clock = _clock()
+    cache = ConversationCache(
+        timedelta(minutes=15),
+        now=clock,
+        ttl_by_key={"channel:1": timedelta(minutes=2)},
+    )
+    cache.set("channel:1", "conv-short")
+    clock.advance(timedelta(minutes=3))
+    assert cache.get("channel:1") is None
+
+
 async def test_turn_locks_evict_only_unused_keys():
     from custom_components.discord_assist.conversation_cache import TurnLocks
 

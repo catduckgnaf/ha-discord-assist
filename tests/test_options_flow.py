@@ -9,6 +9,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.discord_assist.const import (
     CONF_AGENT_ID,
     CONF_BOT_ID,
+    CONF_CHANNEL_IDLE_MINUTES,
     CONF_CHANNELS,
     CONF_FALLBACK_USER,
     CONF_ROOM_MAP,
@@ -47,6 +48,8 @@ async def test_options_menu_shown(hass: HomeAssistant):
         "remove_user_map",
         "add_room",
         "remove_room",
+        "add_channel_idle",
+        "remove_channel_idle",
     }
 
 
@@ -180,6 +183,70 @@ async def test_remove_room_channel(hass: HomeAssistant):
         result["flow_id"], {"channel_id": "555"}
     )
     assert entry.options[CONF_ROOM_MAP] == {"556": "dev-kitchen"}
+
+
+async def test_add_channel_idle_override(hass: HomeAssistant):
+    entry = _entry(hass)
+    with patch(
+        "custom_components.discord_assist.config_flow.list_text_channels",
+        new=AsyncMock(return_value=[("555", "Home / #general")]),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "add_channel_idle"}
+        )
+        assert result["step_id"] == "add_channel_idle"
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"channel_id": "555", "idle_minutes": 45}
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_CHANNEL_IDLE_MINUTES] == {"555": 45}
+
+
+async def test_add_channel_idle_rejects_bad_values(hass: HomeAssistant):
+    entry = _entry(hass)
+    with patch(
+        "custom_components.discord_assist.config_flow.list_text_channels",
+        new=AsyncMock(return_value=[]),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "add_channel_idle"}
+        )
+        bad_channel = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"channel_id": "general", "idle_minutes": 45}
+        )
+        assert bad_channel["errors"] == {"base": "invalid_channel_id"}
+    assert entry.options.get(CONF_CHANNEL_IDLE_MINUTES, {}) == {}
+
+
+async def test_remove_channel_idle_override(hass: HomeAssistant):
+    entry = _entry(
+        hass,
+        options={
+            CONF_AGENT_ID: "conversation.ollama",
+            CONF_USER_MAP: {},
+            CONF_CHANNEL_IDLE_MINUTES: {"555": 45, "556": 5},
+        },
+    )
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "remove_channel_idle"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"channel_id": "555"}
+    )
+    assert entry.options[CONF_CHANNEL_IDLE_MINUTES] == {"556": 5}
+
+
+async def test_remove_channel_idle_aborts_when_none(hass: HomeAssistant):
+    entry = _entry(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "remove_channel_idle"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "no_channel_idle"
 
 
 async def test_remove_room_aborts_when_none(hass: HomeAssistant):

@@ -13,6 +13,7 @@ from custom_components.discord_assist.const import (
     CONF_AGENT_ID,
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
+    CONF_CHANNEL_IDLE_MINUTES,
     CONF_PREFER_LOCAL,
     CONF_ROOM_MAP,
     CONF_USER_MAP,
@@ -23,6 +24,7 @@ from custom_components.discord_assist.conversation_router import (
     AgentTimeout,
     ConversationRouter,
     MessageContext,
+    is_reset_command,
     make_conversation_key,
     resolve_ha_user_id,
 )
@@ -353,6 +355,65 @@ async def test_speaker_context_off_sends_no_prompt():
     with patch(_CONVERSE, new=AsyncMock(return_value=_result())) as conv:
         await router.process(text="hi", discord_user_id=7, conversation_key="dm:7")
     assert conv.call_args.kwargs["extra_system_prompt"] is None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("reset", True),
+        ("Reset", True),
+        ("RESET", True),
+        ("  reset  ", True),
+        ("please reset the lights", False),
+        ("reset the lights", False),
+        ("reset.", False),
+        ("", False),
+    ],
+)
+def test_is_reset_command(text, expected):
+    assert is_reset_command(text) is expected
+
+
+def test_reset_conversation_clears_cached_id():
+    router = _router(user_map={7: "ha-a"})
+    router.cache.set("channel:111", "conv-1")
+    router.reset_conversation("channel:111")
+    assert router.cache.get("channel:111") is None
+
+
+async def test_next_message_after_reset_starts_new_conversation():
+    router = _router(user_map={7: "ha-a"})
+    first = _result("one", conversation_id="conv-1")
+    second = _result("two", conversation_id="conv-2")
+    with patch(_CONVERSE, new=AsyncMock(side_effect=[first, second])) as conv:
+        await router.process(
+            text="hello", discord_user_id=7, conversation_key="channel:111"
+        )
+        assert router.cache.get("channel:111") == "conv-1"
+        router.reset_conversation("channel:111")
+        await router.process(
+            text="hello again", discord_user_id=7, conversation_key="channel:111"
+        )
+    # First turn passed no id; the reset turn's successor also passed no id,
+    # so the agent started a new conversation instead of resuming conv-1.
+    assert conv.call_args_list[0].args[2] is None
+    assert conv.call_args_list[1].args[2] is None
+    assert router.cache.get("channel:111") == "conv-2"
+
+
+def test_from_entry_reads_channel_idle_minutes():
+    entry = SimpleNamespace(
+        options={
+            CONF_AGENT_ID: "conversation.ollama",
+            CONF_CHANNEL_IDLE_MINUTES: {"111": 30, "bad": 5, "222": "x", "333": 0},
+        }
+    )
+    router = ConversationRouter.from_entry(object(), entry)
+    assert router.channel_idle_minutes == {111: 30}
+    assert router.cache._ttl_for("channel:111") == timedelta(minutes=30)
+    assert router.cache._ttl_for("channel:999") == timedelta(
+        minutes=15
+    )  # global default
 
 
 def test_from_entry_reads_new_options():

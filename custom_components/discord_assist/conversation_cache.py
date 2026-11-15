@@ -18,10 +18,15 @@ class ConversationCache:
         self,
         ttl: timedelta,
         now: Callable[[], datetime] = dt_util.utcnow,
+        ttl_by_key: dict[str, timedelta] | None = None,
     ) -> None:
         self._ttl = ttl
         self._now = now
+        self._ttl_by_key = dict(ttl_by_key or {})
         self._store: dict[str, tuple[str, datetime]] = {}
+
+    def _ttl_for(self, key: str) -> timedelta:
+        return self._ttl_by_key.get(key, self._ttl)
 
     def get(self, key: str) -> str | None:
         # Eviction is lazy (only on access) by design: inactive keys persist until
@@ -30,7 +35,7 @@ class ConversationCache:
         if item is None:
             return None
         conversation_id, last_used = item
-        if self._now() - last_used > self._ttl:
+        if self._now() - last_used > self._ttl_for(key):
             del self._store[key]
             return None
         return conversation_id
@@ -40,6 +45,10 @@ class ConversationCache:
             self._store.pop(key, None)
             return
         self._store[key] = (conversation_id, self._now())
+
+    def reset(self, key: str) -> None:
+        """Drop the cached conversation id for ``key`` (the `reset` command)."""
+        self._store.pop(key, None)
 
 
 class TurnLocks:

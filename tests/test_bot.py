@@ -3,7 +3,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 
-from custom_components.discord_assist.bot import TIMEOUT_REPLY, DiscordAssistClient
+from custom_components.discord_assist.bot import (
+    RESET_REPLY,
+    TIMEOUT_REPLY,
+    DiscordAssistClient,
+)
 from custom_components.discord_assist.conversation_router import AgentTimeout
 
 
@@ -211,6 +215,55 @@ async def test_typing_failure_after_answer_does_not_rerun_agent(monkeypatch):
     await client.on_message(msg)
     router.process.assert_awaited_once()
     assert _first_send(msg).args[0] == "Unlocked."
+
+
+async def test_reset_command_clears_conversation_without_agent(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.process = AsyncMock(return_value="agent reply")
+    client = _client(router, monkeypatch)
+    msg = _message("<@999> Reset", mentions=[SimpleNamespace(id=999)])
+    await client.on_message(msg)
+    router.reset_conversation.assert_called_once_with("channel:111")
+    router.process.assert_not_called()
+    assert _first_send(msg).args[0] == RESET_REPLY == "Started a fresh conversation."
+
+
+async def test_reset_command_in_dm_uses_dm_key(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.process = AsyncMock()
+    client = _client(router, monkeypatch)
+    msg = _message("RESET", is_dm=True)
+    await client.on_message(msg)
+    router.reset_conversation.assert_called_once_with("dm:7")
+    router.process.assert_not_called()
+    assert _first_send(msg).args[0] == RESET_REPLY
+
+
+async def test_reset_from_unauthorized_user_is_ignored(monkeypatch):
+    """should_respond turns unauthorized users away before reset is seen."""
+    router = MagicMock()
+    router.should_respond.return_value = False
+    router.process = AsyncMock()
+    client = _client(router, monkeypatch)
+    msg = _message("reset")
+    await client.on_message(msg)
+    router.reset_conversation.assert_not_called()
+    router.process.assert_not_called()
+    msg.channel.send.assert_not_called()
+
+
+async def test_reset_mid_sentence_goes_to_agent(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.process = AsyncMock(return_value="Reset the lights.")
+    client = _client(router, monkeypatch)
+    msg = _message("please reset the lights")
+    await client.on_message(msg)
+    router.reset_conversation.assert_not_called()
+    router.process.assert_awaited_once()
+    assert router.process.call_args.kwargs["text"] == "please reset the lights"
 
 
 async def test_dm_has_no_channel_name(monkeypatch):

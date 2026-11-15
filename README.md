@@ -13,7 +13,8 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 - Responds in configured guild text channels
 - Responds to direct messages (optional)
 - Responds to @mentions in any channel the bot can see (optional)
-- Per-conversation context window with configurable idle timeout
+- Per-conversation context window with configurable idle timeout, plus per-channel idle overrides
+- Send exactly `reset` to drop the current conversation and start fresh in that channel or DM
 - Replies in threads under the channels it listens to
 - Tells the agent who is speaking, from which channel, and the local time
 - Room channels: a channel can stand for a room, so "close the blinds" in `#den` means the den
@@ -104,12 +105,28 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for what is planned to make this easier.
 | Channels to listen in | (none) | Guild text channels where the bot responds to all messages |
 | Respond to direct messages | Yes | Whether to respond when users DM the bot |
 | Respond to @mentions anywhere | Yes | Whether to respond when the bot is @mentioned in any channel |
-| Idle minutes | 15 | Minutes of inactivity before conversation context resets |
+| Idle minutes | 15 | Minutes of inactivity before Discord Assist drops the conversation and starts a new one. A per-channel override can be set in options under **Set a per-channel idle reset**. See [Conversation memory and `reset`](#conversation-memory-and-reset) for the 5 minute Home Assistant limit this cannot override |
 | Language | (HA default) | BCP-47 language tag passed to the conversation agent |
 | Allowed Discord user IDs | (none) | Discord user IDs allowed to use the bot as the fallback user; mapped users are always allowed |
 | Speaker context | Yes | Sends the agent the speaker's Discord name and Home Assistant user, the channel, the room (for room channels), and the local time, as extra system prompt text. Agents that ignore extra prompt text are unaffected |
 | Built-in commands first | No | Tries `conversation.home_assistant` first and only asks your agent when the built-in agent does not understand the request or finds no matching device. A command it matched but failed is not retried, so nothing runs twice |
 | Agent timeout | 60 s | Gives up and says so instead of typing forever |
+
+## Conversation memory and `reset`
+
+Discord Assist keeps one conversation per channel (or per user, in DMs) and reuses its conversation id until the conversation has been idle for the configured idle minutes (15 by default, with an optional per-channel override in options).
+
+**The 5 minute limit:** Home Assistant itself expires a chat session after 5 idle minutes and deletes its chat log. For agents built on Home Assistant's chat log (all core LLM agents, and Extended OpenAI Conversation), the history is gone after 5 idle minutes no matter what the idle setting here says. A longer idle value does not give those agents longer memory; it only changes when Discord Assist stops reusing the conversation id, which still matters for agents that keep their own history keyed by that id.
+
+Discord Assist does not keep its own copy of your conversations to replay to the agent later. Longer memory is planned as standing preferences (facts you ask it to remember) instead of transcripts; see [docs/ROADMAP.md](docs/ROADMAP.md) for the decision.
+
+To start fresh on purpose, send a message that is exactly:
+
+```text
+reset
+```
+
+The bot drops the cached conversation for that channel or DM, replies "Started a fresh conversation.", and your next message begins a new conversation. A message that only contains the word, like "please reset the lights", is not a command and goes to the agent as usual.
 
 ## Room channels
 

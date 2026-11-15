@@ -12,6 +12,7 @@ from .conversation_router import (
     AgentTimeout,
     ConversationRouter,
     MessageContext,
+    is_reset_command,
     make_conversation_key,
 )
 from .text_utils import chunk_message, strip_self_mention
@@ -21,6 +22,7 @@ _LOGGER = logging.getLogger(__name__)
 ERROR_REPLY = "Sorry, I hit an error talking to Home Assistant."
 EMPTY_REPLY = "(no response)"
 TIMEOUT_REPLY = "Sorry, Home Assistant took too long to answer. Try again?"
+RESET_REPLY = "Started a fresh conversation."
 
 
 class DiscordAssistClient(discord.Client):
@@ -82,6 +84,12 @@ class DiscordAssistClient(discord.Client):
         key = make_conversation_key(
             is_dm=is_dm, channel_id=message.channel.id, author_id=message.author.id
         )
+        if is_reset_command(text):
+            # Only reachable by authorized users: should_respond above has
+            # already turned everyone else away, like any other message.
+            self.router.reset_conversation(key)
+            await self._send_reply(message, RESET_REPLY)
+            return
         where = MessageContext(
             display_name=getattr(message.author, "display_name", None),
             channel_name=None if is_dm else getattr(message.channel, "name", None),

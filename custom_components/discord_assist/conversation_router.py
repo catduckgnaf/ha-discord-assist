@@ -20,6 +20,7 @@ from .const import (
     CONF_AGENT_ID,
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
+    CONF_CHANNEL_IDLE_MINUTES,
     CONF_CHANNELS,
     CONF_FALLBACK_USER,
     CONF_IDLE_MINUTES,
@@ -86,6 +87,33 @@ def _coerce_int_keys(mapping, field_name) -> dict[int, str]:
     return result
 
 
+def _coerce_int_map(mapping, field_name) -> dict[int, int]:
+    """Coerce a mapping to int keys and positive int values, skipping bad ones."""
+    result: dict[int, int] = {}
+    for key, value in (mapping or {}).items():
+        try:
+            channel_id = int(key)
+            minutes = int(value)
+        except TypeError, ValueError:
+            _LOGGER.warning("Ignoring non-numeric %s entry: %r", field_name, key)
+            continue
+        if minutes <= 0:
+            _LOGGER.warning("Ignoring non-positive %s entry: %r", field_name, key)
+            continue
+        result[channel_id] = minutes
+    return result
+
+
+def is_reset_command(text: str) -> bool:
+    """True only when the whole message is the word "reset" (any case).
+
+    The text has already had the bot's own mention stripped. A message that
+    merely contains the word, like "please reset the lights", is an ordinary
+    message for the agent, not a command.
+    """
+    return text.strip().casefold() == "reset"
+
+
 def _clean_name(value: str | None) -> str | None:
     """Discord names are user-controlled: one line, no control chars, capped."""
     if not value:
@@ -134,6 +162,7 @@ class ConversationRouter:
     fallback_user: str | None
     cache: ConversationCache
     room_map: dict[int, str] = field(default_factory=dict)
+    channel_idle_minutes: dict[int, int] = field(default_factory=dict)
     speaker_context: bool = DEFAULT_SPEAKER_CONTEXT
     prefer_local: bool = DEFAULT_PREFER_LOCAL
     agent_timeout: float = DEFAULT_AGENT_TIMEOUT
@@ -159,6 +188,14 @@ class ConversationRouter:
         ):
             return None
         return resolve_ha_user_id(self.user_map, self.fallback_user, discord_user_id)
+
+    def reset_conversation(self, conversation_key: str) -> None:
+        """Forget the cached conversation id for a key (the `reset` command).
+
+        The next message for this key passes no conversation id, so the agent
+        starts a new conversation.
+        """
+        self.cache.reset(conversation_key)
 
     def device_for(self, channel_id: int | None, parent_id: int | None) -> str | None:
         """Device standing in for the room a channel (or its thread) represents."""
@@ -290,6 +327,9 @@ class ConversationRouter:
     @classmethod
     def from_entry(cls, hass: HomeAssistant, entry: ConfigEntry) -> ConversationRouter:
         opts = entry.options
+        channel_idle = _coerce_int_map(
+            opts.get(CONF_CHANNEL_IDLE_MINUTES), "channel idle minutes"
+        )
         return cls(
             hass=hass,
             agent_id=opts.get(CONF_AGENT_ID),
@@ -301,9 +341,14 @@ class ConversationRouter:
             user_map=_coerce_int_keys(opts.get(CONF_USER_MAP), "Discord user id"),
             fallback_user=opts.get(CONF_FALLBACK_USER) or None,
             cache=ConversationCache(
-                timedelta(minutes=opts.get(CONF_IDLE_MINUTES, DEFAULT_IDLE_MINUTES))
+                timedelta(minutes=opts.get(CONF_IDLE_MINUTES, DEFAULT_IDLE_MINUTES)),
+                ttl_by_key={
+                    f"channel:{channel_id}": timedelta(minutes=minutes)
+                    for channel_id, minutes in channel_idle.items()
+                },
             ),
             room_map=_coerce_int_keys(opts.get(CONF_ROOM_MAP), "room channel id"),
+            channel_idle_minutes=channel_idle,
             speaker_context=opts.get(CONF_SPEAKER_CONTEXT, DEFAULT_SPEAKER_CONTEXT),
             prefer_local=opts.get(CONF_PREFER_LOCAL, DEFAULT_PREFER_LOCAL),
             agent_timeout=float(opts.get(CONF_AGENT_TIMEOUT, DEFAULT_AGENT_TIMEOUT)),

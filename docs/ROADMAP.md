@@ -53,8 +53,11 @@ Grouped by theme. Effort: S (hours), M (a day or two), L (a week).
    (`conversation.home_assistant`) first and only fall back to the LLM when no
    intent matches. "Turn off all the lights" becomes instant, free, and
    deterministic. Mirrors Print Handy's deterministic-first routing.
-4. **Longer memory (S).** Raise the idle reset default and add a per-channel
-   override. Add a `reset` command (and slash command) to start fresh.
+4. **Longer memory (S).** Done in part, with a limit: see the decision below.
+   The `reset` text command and a per-channel idle override shipped; the idle
+   default was not raised, because Home Assistant core expires chat sessions
+   after 5 idle minutes (below). The `/reset` slash command is part of the
+   slash commands work (#19).
 5. **Standing preferences (M).** "Remember: all the lights means all lights."
    Store per-user notes in the integration's store and inject them via
    `extra_system_prompt`. Editable in options and via a `/remember` command.
@@ -65,6 +68,33 @@ Grouped by theme. Effort: S (hours), M (a day or two), L (a week).
    family channel gets the LLM.
 8. **Reply as a reply (S).** Use `message.reply()` with
    `fail_if_not_exists=False` so answers thread visually.
+
+### Decision: longer memory means preferences, not transcripts (#15)
+
+Home Assistant core expires a chat session after 5 idle minutes
+(`CONVERSATION_TIMEOUT` in `helpers/chat_session.py`), and the chat log is
+deleted with the session. For every agent built on `ChatLog` (all core LLM
+agents, and Extended OpenAI Conversation), the history is therefore gone
+after 5 idle minutes no matter what conversation id Discord Assist caches.
+Raising Discord Assist's idle default above 5 minutes does nothing for those
+agents, so the default stays at 15 minutes and the limit is stated plainly in
+the README instead.
+
+Decision: Discord Assist will **not** keep its own transcript and re-supply
+it to the agent (for example via `extra_system_prompt`). Re-supplying would
+duplicate history the agent already manages, spend tokens on every turn, and
+risk stale or conflicting context. Longer memory instead comes from standing
+preferences (suggestion 5, #16): short, deliberate facts the user asked to
+keep, injected on every turn.
+
+What the idle settings do control is when Discord Assist drops the cached
+conversation id: the global idle minutes, plus a per-channel override in
+options for channels that should reset sooner or later. That matters for
+agents that keep their own history keyed by conversation id, and for keeping
+busy channels from resuming stale threads. Sending a message that is exactly
+`reset` (any case) drops the cached id for that channel or DM on demand and
+replies "Started a fresh conversation."; the `/reset` slash command is
+tracked with the slash commands work (#19).
 
 ### Discord features
 
