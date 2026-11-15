@@ -14,6 +14,7 @@ from .conversation_router import (
     MessageContext,
     make_conversation_key,
 )
+from .slash_commands import NotesStore, build_command_tree
 from .text_utils import chunk_message, strip_self_mention
 
 _LOGGER = logging.getLogger(__name__)
@@ -40,14 +41,55 @@ class DiscordAssistClient(discord.Client):
         self.router = router
         self.connected = False
         self._status_signal = status_signal
+        self.notes = NotesStore()
+        # The client owns its slash-command tree. Building it needs a fully
+        # initialized discord.Client (http session + connection state), so
+        # a failure here (for example a test double) leaves _tree unset and
+        # the tree property builds it lazily on first real use.
+        self._tree: discord.app_commands.CommandTree | None = None
+        try:
+            self._tree = build_command_tree(self)
+        except Exception:  # noqa: BLE001 - slash commands must not break setup
+            _LOGGER.debug("Command tree deferred until first use", exc_info=True)
+
+    @property
+    def tree(self) -> discord.app_commands.CommandTree:
+        """The slash-command tree owned by this client (built lazily)."""
+        if self._tree is None:
+            self._tree = build_command_tree(self)
+        return self._tree
 
     def _set_connected(self, connected: bool) -> None:
         if connected != self.connected:
             self.connected = connected
             async_dispatcher_send(self.hass, self._status_signal)
 
+    async def _sync_slash_commands(self) -> None:
+        """Copy the global commands to each guild and sync per guild.
+
+        Guild sync applies immediately, unlike global sync, which can take
+        a while to propagate. A failure for one guild must not stop the
+        others, or the gateway connection itself.
+        """
+        try:
+            guilds = list(self.guilds)
+        except Exception:  # noqa: BLE001 - no guild view, nothing to sync
+            _LOGGER.debug("Cannot list guilds for command sync", exc_info=True)
+            return
+        for guild in guilds:
+            try:
+                self.tree.copy_global_to(guild=guild)
+                await self.tree.sync(guild=guild)
+            except Exception:  # noqa: BLE001 - one guild must not block others
+                _LOGGER.warning(
+                    "Failed to sync slash commands to guild %s",
+                    getattr(guild, "id", guild),
+                    exc_info=True,
+                )
+
     async def on_ready(self) -> None:
         self._set_connected(True)
+        await self._sync_slash_commands()
 
     async def on_resumed(self) -> None:
         self._set_connected(True)

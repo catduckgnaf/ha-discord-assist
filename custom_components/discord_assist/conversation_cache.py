@@ -41,6 +41,10 @@ class ConversationCache:
             return
         self._store[key] = (conversation_id, self._now())
 
+    def clear(self, key: str) -> None:
+        """Drop any cached conversation id for ``key`` (used by /reset)."""
+        self._store.pop(key, None)
+
 
 class TurnLocks:
     """One FIFO lock per conversation key, kept in a bounded LRU.

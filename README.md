@@ -13,6 +13,7 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 - Responds in configured guild text channels
 - Responds to direct messages (optional)
 - Responds to @mentions in any channel the bot can see (optional)
+- Slash commands: `/assist`, `/state` (exposed-entity autocomplete), `/reset`, `/remember`, `/notes`, `/forget`, `/whoami`
 - Per-conversation context window with configurable idle timeout
 - Replies in threads under the channels it listens to
 - Tells the agent who is speaking, from which channel, and the local time
@@ -71,9 +72,25 @@ Requests never run without a Home Assistant user, so permissions always apply. U
 ### Invite the bot to your server
 
 1. In the Developer Portal, go to **OAuth2 → URL Generator**.
-2. Under **Scopes**, select `bot` and `applications.commands`.
+2. Under **Scopes**, select `bot` and `applications.commands`. The `applications.commands` scope is required for the slash commands below; if you invited the bot before slash commands existed, re-invite it with the same URL so the scope is granted.
 3. Under **Bot Permissions**, select **Read Messages/View Channels**, **Send Messages**, and **Read Message History**.
 4. Copy the generated URL, open it in your browser, and invite the bot to your server.
+
+## Slash commands
+
+The bot registers slash commands in every server it serves (synced per server when it connects, so they appear right away):
+
+| Command | Description |
+|---------|-------------|
+| `/assist <text>` | Ask Home Assistant Assist. Shares the channel's conversation (or your DM conversation) and its turn lock with plain messages. |
+| `/state <entity>` | Read one entity's current state (ephemeral: only you see it). The entity picker only offers entities exposed to Assist, and the read runs as your mapped Home Assistant user, so their read permissions apply. |
+| `/reset` | Drop the cached conversation for this channel or DM, so the next message starts a new conversation. |
+| `/remember <note>` | Save a short standing-preference note for yourself (ephemeral). Notes are kept per Discord user; at most 10 notes of 200 characters each. |
+| `/notes` | List your saved notes (ephemeral). |
+| `/forget <number>` | Remove the note with that number from `/notes` (ephemeral). |
+| `/whoami` | Show which Home Assistant user you are mapped to (ephemeral). |
+
+Every command acknowledges first, then works, so a slow agent answer does not make the interaction fail. Users with no Home Assistant mapping get an ephemeral refusal and nothing runs, the same fail-closed rule as plain messages.
 
 ## Migrating from Discord Conversation
 
