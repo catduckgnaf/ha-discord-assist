@@ -25,6 +25,7 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 - Replies can never ping `@everyone`, roles, or users
 - Retries setup when Discord is unreachable and reloads if the gateway dies
 - `Discord gateway` connectivity sensor for alerting
+- One `notify` entity per configured channel, so `notify.send_message` can post to Discord from automations
 - Repair issues for "nobody is authorized" and a missing Message Content intent
 - One-click import from the Discord Conversation integration it was forked from
 
