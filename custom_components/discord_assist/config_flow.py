@@ -36,24 +36,38 @@ from homeassistant.helpers.selector import (
 
 from .const import (
     CONF_AGENT_ID,
+    CONF_AGENT_MAP_CHANNEL,
+    CONF_AGENT_MAP_USER,
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
     CONF_BOT_ID,
     CONF_CHANNEL_IDLE_MINUTES,
     CONF_CHANNELS,
+    CONF_CONVERSATION_SCOPE,
+    CONF_EVENT_EXCLUDE_TEXT,
     CONF_FALLBACK_USER,
     CONF_IDLE_MINUTES,
     CONF_LANGUAGE,
+    CONF_PLACEHOLDER_DELAY,
     CONF_PREFER_LOCAL,
+    CONF_RATE_LIMIT_BURST,
+    CONF_RATE_LIMIT_PER_MINUTE,
     CONF_RESPOND_DMS,
     CONF_RESPOND_MENTIONS,
     CONF_ROOM_MAP,
     CONF_SPEAKER_CONTEXT,
     CONF_TOKEN,
     CONF_USER_MAP,
+    CONVERSATION_SCOPE_CHANNEL,
+    CONVERSATION_SCOPE_USER,
     DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_CONVERSATION_SCOPE,
+    DEFAULT_EVENT_EXCLUDE_TEXT,
     DEFAULT_IDLE_MINUTES,
+    DEFAULT_PLACEHOLDER_DELAY,
     DEFAULT_PREFER_LOCAL,
+    DEFAULT_RATE_LIMIT_BURST,
+    DEFAULT_RATE_LIMIT_PER_MINUTE,
     DEFAULT_RESPOND_DMS,
     DEFAULT_RESPOND_MENTIONS,
     DEFAULT_SPEAKER_CONTEXT,
@@ -61,6 +75,14 @@ from .const import (
     LEGACY_DOMAIN,
 )
 from .discord_api import CannotConnect, InvalidAuth, list_text_channels, validate_token
+
+
+def _agent_selector() -> EntitySelector:
+    """Conversation-agent picker, the same selector as the main agent field."""
+    return EntitySelector(
+        EntitySelectorConfig(filter=EntityFilterSelectorConfig(domain="conversation"))
+    )
+
 
 STEP_USER_SCHEMA = vol.Schema(
     {
@@ -75,11 +97,7 @@ def build_config_schema(channel_options: list[SelectOptionDict]) -> vol.Schema:
     """Schema for the main settings form (shared by config + options flows)."""
     return vol.Schema(
         {
-            vol.Required(CONF_AGENT_ID): EntitySelector(
-                EntitySelectorConfig(
-                    filter=EntityFilterSelectorConfig(domain="conversation")
-                )
-            ),
+            vol.Required(CONF_AGENT_ID): _agent_selector(),
             vol.Optional(CONF_CHANNELS, default=[]): SelectSelector(
                 SelectSelectorConfig(
                     options=channel_options, multiple=True, mode=SelectSelectorMode.LIST
@@ -106,6 +124,9 @@ def build_config_schema(channel_options: list[SelectOptionDict]) -> vol.Schema:
                 CONF_SPEAKER_CONTEXT, default=DEFAULT_SPEAKER_CONTEXT
             ): BooleanSelector(),
             vol.Optional(
+                CONF_EVENT_EXCLUDE_TEXT, default=DEFAULT_EVENT_EXCLUDE_TEXT
+            ): BooleanSelector(),
+            vol.Optional(
                 CONF_PREFER_LOCAL, default=DEFAULT_PREFER_LOCAL
             ): BooleanSelector(),
             vol.Optional(
@@ -114,6 +135,52 @@ def build_config_schema(channel_options: list[SelectOptionDict]) -> vol.Schema:
                 NumberSelectorConfig(
                     min=5,
                     max=600,
+                    step=1,
+                    mode=NumberSelectorMode.BOX,
+                    unit_of_measurement="s",
+                )
+            ),
+            vol.Optional(
+                CONF_CONVERSATION_SCOPE, default=DEFAULT_CONVERSATION_SCOPE
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(
+                            value=CONVERSATION_SCOPE_CHANNEL,
+                            label="Channel: one shared conversation per channel",
+                        ),
+                        SelectOptionDict(
+                            value=CONVERSATION_SCOPE_USER,
+                            label="User: one conversation per person in each channel",
+                        ),
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                CONF_RATE_LIMIT_PER_MINUTE, default=DEFAULT_RATE_LIMIT_PER_MINUTE
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=600,
+                    step=1,
+                    mode=NumberSelectorMode.BOX,
+                    unit_of_measurement="requests/min",
+                )
+            ),
+            vol.Optional(
+                CONF_RATE_LIMIT_BURST, default=DEFAULT_RATE_LIMIT_BURST
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=1, max=100, step=1, mode=NumberSelectorMode.BOX
+                )
+            ),
+            vol.Optional(
+                CONF_PLACEHOLDER_DELAY, default=DEFAULT_PLACEHOLDER_DELAY
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=60,
                     step=1,
                     mode=NumberSelectorMode.BOX,
                     unit_of_measurement="s",
@@ -210,6 +277,8 @@ class DiscordAssistConfigFlow(ConfigFlow, domain=DOMAIN):
             options[CONF_LANGUAGE] = options.get(CONF_LANGUAGE) or None
             options.setdefault(CONF_USER_MAP, {})
             options.setdefault(CONF_FALLBACK_USER, None)
+            options.setdefault(CONF_AGENT_MAP_USER, {})
+            options.setdefault(CONF_AGENT_MAP_CHANNEL, {})
             return self.async_create_entry(
                 title="Discord Assist",
                 data={CONF_TOKEN: self._token, CONF_BOT_ID: self._bot_id},
@@ -292,6 +361,10 @@ class DiscordAssistOptionsFlow(OptionsFlowWithReload):
                 "remove_room",
                 "add_channel_idle",
                 "remove_channel_idle",
+                "add_agent_user",
+                "remove_agent_user",
+                "add_agent_channel",
+                "remove_agent_channel",
             ],
         )
 
@@ -477,3 +550,99 @@ class DiscordAssistOptionsFlow(OptionsFlowWithReload):
             return self.async_abort(reason="no_channel_idle")
         schema = vol.Schema({vol.Required("channel_id"): vol.In(sorted(idle_map))})
         return self.async_show_form(step_id="remove_channel_idle", data_schema=schema)
+
+    async def async_step_add_agent_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Use a specific conversation agent for one Discord user.
+
+        A user override wins over a channel override and the entry default
+        (see ConversationRouter.agent_for).
+        """
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            if not str(user_input["discord_user_id"]).isdigit():
+                errors["base"] = "invalid_user_id"
+            else:
+                merged = dict(self.config_entry.options)
+                agent_map = dict(merged.get(CONF_AGENT_MAP_USER, {}))
+                agent_map[str(user_input["discord_user_id"])] = user_input[
+                    CONF_AGENT_ID
+                ]
+                merged[CONF_AGENT_MAP_USER] = agent_map
+                return self.async_create_entry(title="", data=merged)
+
+        schema = vol.Schema(
+            {
+                vol.Required("discord_user_id"): TextSelector(),
+                vol.Required(CONF_AGENT_ID): _agent_selector(),
+            }
+        )
+        return self.async_show_form(
+            step_id="add_agent_user", data_schema=schema, errors=errors
+        )
+
+    async def async_step_remove_agent_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        agent_map = dict(self.config_entry.options.get(CONF_AGENT_MAP_USER, {}))
+        if user_input is not None:
+            agent_map.pop(str(user_input["discord_user_id"]), None)
+            merged = dict(self.config_entry.options)
+            merged[CONF_AGENT_MAP_USER] = agent_map
+            return self.async_create_entry(title="", data=merged)
+        if not agent_map:
+            return self.async_abort(reason="no_user_agents")
+        schema = vol.Schema(
+            {vol.Required("discord_user_id"): vol.In(sorted(agent_map))}
+        )
+        return self.async_show_form(step_id="remove_agent_user", data_schema=schema)
+
+    async def async_step_add_agent_channel(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Use a specific conversation agent in one Discord channel.
+
+        Threads inherit their parent channel's agent.
+        """
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            channel_id = str(user_input["channel_id"]).strip()
+            if not channel_id.isdigit():
+                errors["base"] = "invalid_channel_id"
+            else:
+                merged = dict(self.config_entry.options)
+                agent_map = dict(merged.get(CONF_AGENT_MAP_CHANNEL, {}))
+                agent_map[channel_id] = user_input[CONF_AGENT_ID]
+                merged[CONF_AGENT_MAP_CHANNEL] = agent_map
+                return self.async_create_entry(title="", data=merged)
+
+        schema = vol.Schema(
+            {
+                vol.Required("channel_id"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=await self._channel_options(),
+                        custom_value=True,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(CONF_AGENT_ID): _agent_selector(),
+            }
+        )
+        return self.async_show_form(
+            step_id="add_agent_channel", data_schema=schema, errors=errors
+        )
+
+    async def async_step_remove_agent_channel(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        agent_map = dict(self.config_entry.options.get(CONF_AGENT_MAP_CHANNEL, {}))
+        if user_input is not None:
+            agent_map.pop(str(user_input["channel_id"]), None)
+            merged = dict(self.config_entry.options)
+            merged[CONF_AGENT_MAP_CHANNEL] = agent_map
+            return self.async_create_entry(title="", data=merged)
+        if not agent_map:
+            return self.async_abort(reason="no_channel_agents")
+        schema = vol.Schema({vol.Required("channel_id"): vol.In(sorted(agent_map))})
+        return self.async_show_form(step_id="remove_agent_channel", data_schema=schema)
