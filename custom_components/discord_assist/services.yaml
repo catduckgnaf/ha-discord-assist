@@ -1,6 +1,6 @@
 send_message:
   name: Send message
-  description: Send a message to a Discord channel or user through a loaded Discord Assist entry. Optionally returns the sent message ID as response data.
+  description: Send a message to a Discord channel or user through a loaded Discord Assist entry. Optionally returns the ID of the message carrying the buttons as response data.
   fields:
     config_entry_id:
       name: Config entry
@@ -32,7 +32,7 @@ send_message:
         text:
     buttons:
       name: Buttons
-      description: Optional list of buttons, each with an id, a label, and an optional style (primary, secondary, success, or danger).
+      description: Optional list of up to 25 buttons, each with an id (the action a discord_assist_action event reports), a label, and optionally a style (primary, secondary, success, or danger), allowed_discord_user_ids, multi_use, and entity_ids whose state is re-checked on press.
       required: false
       example:
         - id: "approve"

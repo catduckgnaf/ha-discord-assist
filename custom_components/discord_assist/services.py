@@ -1,14 +1,20 @@
-"""Service actions for Discord Assist (currently ``send_message``)."""
+"""Service actions for Discord Assist (currently ``send_message``).
+
+Actions are registered once in ``async_setup``, so they exist (and fail
+with a clear error) even while no entry is loaded, and automations using
+them validate at startup.
+"""
 
 from __future__ import annotations
 
 import io
 import logging
-import os
+from pathlib import Path
 from typing import Any
 
 import discord
 import voluptuous as vol
+from homeassistant.auth.permissions.const import POLICY_READ
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import (
     HomeAssistant,
@@ -16,34 +22,39 @@ from homeassistant.core import (
     ServiceResponse,
     SupportsResponse,
 )
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.exceptions import ServiceValidationError, Unauthorized
 from homeassistant.helpers import config_validation as cv
 
 from .const import DOMAIN, SERVICE_SEND_MESSAGE
-from .text_utils import chunk_message
 
 _LOGGER = logging.getLogger(__name__)
 
-# Friendly style names (plus the aliases Discord itself uses in its docs)
-# mapped to discord.py button styles. "link" is deliberately absent: link
-# buttons carry a URL instead of a custom_id, so they cannot report clicks.
-_BUTTON_STYLES: dict[str, discord.ButtonStyle] = {
-    "primary": discord.ButtonStyle.primary,
-    "blurple": discord.ButtonStyle.primary,
-    "secondary": discord.ButtonStyle.secondary,
-    "grey": discord.ButtonStyle.secondary,
-    "gray": discord.ButtonStyle.secondary,
-    "success": discord.ButtonStyle.success,
-    "green": discord.ButtonStyle.success,
-    "danger": discord.ButtonStyle.danger,
-    "red": discord.ButtonStyle.danger,
+# Friendly style names (plus the aliases Discord itself uses in its docs).
+# "link" is deliberately absent: link buttons carry a URL instead of a
+# custom_id, so they cannot report clicks.
+_BUTTON_STYLES = {
+    "primary": "primary",
+    "blurple": "primary",
+    "secondary": "secondary",
+    "grey": "secondary",
+    "gray": "secondary",
+    "success": "success",
+    "green": "success",
+    "danger": "danger",
+    "red": "danger",
 }
 
+# Discord allows at most 25 buttons per message and 80 characters a label.
 _BUTTON_SCHEMA = vol.Schema(
     {
-        vol.Required("id"): cv.string,
-        vol.Required("label"): cv.string,
-        vol.Optional("style", default="primary"): cv.string,
+        vol.Required("id"): vol.All(cv.string, vol.Length(min=1, max=100)),
+        vol.Required("label"): vol.All(cv.string, vol.Length(min=1, max=80)),
+        vol.Optional("style", default="primary"): vol.All(
+            cv.string, vol.Lower, vol.In(_BUTTON_STYLES)
+        ),
+        vol.Optional("allowed_discord_user_ids"): [vol.Coerce(int)],
+        vol.Optional("multi_use", default=False): cv.boolean,
+        vol.Optional("entity_ids"): cv.entity_ids,
     }
 )
 
@@ -53,43 +64,29 @@ SEND_MESSAGE_SCHEMA = vol.Schema(
         vol.Required("target"): vol.Coerce(str),
         vol.Required("message"): cv.string,
         vol.Optional("image"): cv.string,
-        vol.Optional("buttons"): [_BUTTON_SCHEMA],
+        vol.Optional("buttons"): vol.All([_BUTTON_SCHEMA], vol.Length(max=25)),
     }
 )
 
 
-def _build_view(buttons: list[dict[str, Any]] | None) -> discord.ui.View | None:
-    """Render the ``buttons`` field as a view with ``da:act:<id>`` custom ids.
-
-    The view is self-contained on this branch (persistent, no timeout). The
-    persistent dispatcher that routes clicks on these custom ids back into
-    Home Assistant is a separate piece of work; until it lands, the buttons
-    render and can be clicked, but no action is dispatched.
-    """
-    if not buttons:
-        return None
-    view = discord.ui.View(timeout=None)
-    for button in buttons:
-        style_name = str(button.get("style") or "primary").lower()
-        style = _BUTTON_STYLES.get(style_name)
-        if style is None:
-            raise ServiceValidationError(
-                f"Unknown button style: {button.get('style')}. "
-                f"Use one of: {', '.join(sorted(set(_BUTTON_STYLES)))}"
-            )
-        view.add_item(
-            discord.ui.Button(
-                style=style,
-                label=button["label"],
-                custom_id=f"da:act:{button['id']}",
-            )
-        )
-    return view
+async def _async_check_camera_access(
+    hass: HomeAssistant, call: ServiceCall, entity_id: str
+) -> None:
+    """A user calling the action may only post cameras they may read."""
+    user_id = call.context.user_id
+    if user_id is None:
+        return  # automations and scripts run as the system
+    user = await hass.auth.async_get_user(user_id)
+    if user is None or not user.permissions.check_entity(entity_id, POLICY_READ):
+        raise Unauthorized(context=call.context, entity_id=entity_id)
 
 
-async def _async_discord_file(hass: HomeAssistant, image: str) -> discord.File:
+async def _async_discord_file(
+    hass: HomeAssistant, call: ServiceCall, image: str
+) -> discord.File:
     """Build a discord.File from a camera entity id or an allowed file path."""
     if image.startswith("camera.") and "/" not in image and "\\" not in image:
+        await _async_check_camera_access(hass, call, image)
         try:
             from homeassistant.components.camera import async_get_image
         except Exception as err:  # noqa: BLE001 - camera component unavailable
@@ -115,9 +112,17 @@ async def _async_discord_file(hass: HomeAssistant, image: str) -> discord.File:
             f"Image path is not in an allowed directory: {image}. "
             "Add the directory to allowlist_external_dirs to use it."
         )
-    if not await hass.async_add_executor_job(os.path.isfile, image):
+    path = Path(image)
+
+    def _read() -> bytes | None:
+        return path.read_bytes() if path.is_file() else None
+
+    # Read off the event loop; discord.File(path) would open and read the
+    # file inside it.
+    content = await hass.async_add_executor_job(_read)
+    if content is None:
         raise ServiceValidationError(f"Image file not found: {image}")
-    return discord.File(image)
+    return discord.File(io.BytesIO(content), filename=path.name)
 
 
 async def _resolve_target(client: Any, target: str) -> Any:
@@ -170,12 +175,15 @@ async def _handle_send_message(
     data = call.data
     config_entry_id: str = data["config_entry_id"]
     entry = hass.config_entries.async_get_entry(config_entry_id)
-    if entry is None or entry.state is not ConfigEntryState.LOADED:
+    if (
+        entry is None
+        or entry.domain != DOMAIN
+        or entry.state is not ConfigEntryState.LOADED
+    ):
         raise ServiceValidationError(
             f"Discord Assist config entry is not loaded: {config_entry_id}"
         )
-    runtime = getattr(entry, "runtime_data", None)
-    client = getattr(runtime, "client", None)
+    client = getattr(getattr(entry, "runtime_data", None), "client", None)
     if client is None:
         raise ServiceValidationError(
             f"Discord Assist config entry is not loaded: {config_entry_id}"
@@ -185,56 +193,48 @@ async def _handle_send_message(
     image: str | None = data.get("image")
     if not message.strip() and not image:
         raise ServiceValidationError("A message or an image is required")
+    buttons = [
+        {**button, "style": _BUTTON_STYLES[button["style"]]}
+        for button in data.get("buttons") or ()
+    ]
+    if len({button["id"] for button in buttons}) != len(buttons):
+        raise ServiceValidationError("Button ids must be unique within a message")
 
-    view = _build_view(data.get("buttons"))
     target_channel = await _resolve_target(client, str(data["target"]))
-
-    discord_file = await _async_discord_file(hass, image) if image else None
-    first_sent = None
+    send_kwargs: dict[str, Any] = {}
+    if image:
+        send_kwargs["file"] = await _async_discord_file(hass, call, image)
     try:
-        chunks = chunk_message(message) if message.strip() else [""]
-        for index, chunk in enumerate(chunks):
-            kwargs: dict[str, Any] = {
-                "allowed_mentions": discord.AllowedMentions.none()
-            }
-            if index == len(chunks) - 1:
-                if view is not None:
-                    kwargs["view"] = view
-                if discord_file is not None:
-                    kwargs["file"] = discord_file
-            try:
-                sent = await target_channel.send(chunk, **kwargs)
-            except discord.HTTPException as err:
-                raise ServiceValidationError(
-                    f"Failed to send the message to {data['target']}: {err}"
-                ) from err
-            if first_sent is None:
-                first_sent = sent
+        sent = await client.async_send_action_message(
+            target_channel, message, buttons, **send_kwargs
+        )
+    except discord.HTTPException as err:
+        raise ServiceValidationError(
+            f"Failed to send the message to {data['target']}: {err}"
+        ) from err
     finally:
-        if discord_file is not None:
-            discord_file.close()
+        if "file" in send_kwargs:
+            send_kwargs["file"].close()
 
-    return {"message_id": str(first_sent.id)}
+    # The last message carries the buttons and the image, so it is the one
+    # a later automation would edit or retire.
+    return {
+        "message_id": str(sent[-1].id),
+        "message_ids": [str(message.id) for message in sent],
+        "channel_id": str(target_channel.id),
+    }
 
 
 def async_register_services(hass: HomeAssistant) -> None:
-    """Register discord_assist.send_message once, however many entries load."""
-    if hass.services.has_service(DOMAIN, SERVICE_SEND_MESSAGE):
-        return
+    """Register the integration's actions (once, from async_setup)."""
 
-    async def _handler(call: ServiceCall) -> ServiceResponse:
+    async def _send(call: ServiceCall) -> ServiceResponse:
         return await _handle_send_message(hass, call)
 
     hass.services.async_register(
         DOMAIN,
         SERVICE_SEND_MESSAGE,
-        _handler,
+        _send,
         schema=SEND_MESSAGE_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
-
-
-def async_unregister_services(hass: HomeAssistant) -> None:
-    """Remove discord_assist.send_message when the last entry unloads."""
-    if hass.services.has_service(DOMAIN, SERVICE_SEND_MESSAGE):
-        hass.services.async_remove(DOMAIN, SERVICE_SEND_MESSAGE)
