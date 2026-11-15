@@ -23,6 +23,12 @@ CONF_SPEAKER_CONTEXT = "speaker_context"
 CONF_PREFER_LOCAL = "prefer_local"
 CONF_AGENT_TIMEOUT = "agent_timeout"
 CONF_ROOM_MAP = "room_map"
+CONF_PROFILES = "profiles"
+CONF_PROFILE_USER_MAP = "profile_user_map"
+CONF_PROFILE_ROLE_MAP = "profile_role_map"
+
+# Audit event fired for every handled request (see ConversationRouter).
+EVENT_REQUEST = "discord_assist_request"
 
 DEFAULT_RESPOND_DMS = True
 DEFAULT_RESPOND_MENTIONS = True

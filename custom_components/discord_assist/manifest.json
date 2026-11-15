@@ -1,6 +1,7 @@
 {
   "domain": "discord_assist",
   "name": "Discord Assist",
+  "after_dependencies": ["logbook"],
   "categories": [
     "ai_voice.voice_assistants",
     "messaging_notifications.chat_apps"

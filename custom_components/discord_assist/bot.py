@@ -66,12 +66,20 @@ class DiscordAssistClient(discord.Client):
             else None
         )
         was_mentioned = self.user in message.mentions
+        # Roles only exist for guild members; in DMs there are none, so
+        # only user mappings can apply there.
+        role_ids = (
+            [role.id for role in message.author.roles]
+            if isinstance(message.author, discord.Member)
+            else []
+        )
         if not self.router.should_respond(
             is_dm=is_dm,
             was_mentioned=was_mentioned,
             channel_id=message.channel.id,
             author_id=message.author.id,
             parent_id=parent_id,
+            role_ids=role_ids,
         ):
             return
 
@@ -90,7 +98,7 @@ class DiscordAssistClient(discord.Client):
         )
         reply = ERROR_REPLY
         try:
-            reply = await self._answer(message, text, key, where)
+            reply = await self._answer(message, text, key, where, role_ids, is_dm)
         except AgentTimeout:
             reply = TIMEOUT_REPLY
         except Exception:  # noqa: BLE001 - never let the gateway die
@@ -120,7 +128,13 @@ class DiscordAssistClient(discord.Client):
                 break
 
     async def _answer(
-        self, message: discord.Message, text: str, key: str, where: MessageContext
+        self,
+        message: discord.Message,
+        text: str,
+        key: str,
+        where: MessageContext,
+        role_ids: list[int] | None = None,
+        is_dm: bool = False,
     ) -> str:
         """Process the message, showing a typing indicator best-effort.
 
@@ -134,6 +148,8 @@ class DiscordAssistClient(discord.Client):
                 discord_user_id=message.author.id,
                 conversation_key=key,
                 where=where,
+                role_ids=role_ids or [],
+                is_dm=is_dm,
             )
 
         started = False
