@@ -5,15 +5,24 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
+from typing import Any
 
 import aiohttp
 import discord
-from homeassistant.config_entries import ConfigEntry
+import voluptuous as vol
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+    ServiceValidationError,
+)
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.event import async_track_time_interval
 
+from .approvals import ApprovalManager, ApprovalPolicy, ApprovalStore
 from .bot import DiscordAssistClient
 from .const import (
     CONF_TOKEN,
@@ -21,6 +30,7 @@ from .const import (
     ISSUE_MESSAGE_CONTENT_INTENT,
     ISSUE_NO_AUTHORIZED_USERS,
     RECONNECT_DELAY,
+    SERVICE_REQUEST_APPROVAL,
     issue_id,
     signal_connection,
 )
@@ -30,6 +40,9 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [Platform.BINARY_SENSOR]
 
+# How often pending approvals are checked for expiry.
+APPROVAL_SWEEP_INTERVAL = timedelta(minutes=1)
+
 
 @dataclass
 class RuntimeData:
@@ -37,6 +50,7 @@ class RuntimeData:
 
     client: DiscordAssistClient
     router: ConversationRouter
+    approvals: ApprovalManager
 
 
 type DiscordConfigEntry = ConfigEntry[RuntimeData]
@@ -58,9 +72,70 @@ def _set_issue(hass: HomeAssistant, entry: ConfigEntry, kind: str, active: bool)
         ir.async_delete_issue(hass, DOMAIN, issue_id(kind, entry.entry_id))
 
 
+_REQUEST_APPROVAL_SCHEMA = vol.Schema(
+    {
+        vol.Required("config_entry_id"): str,
+        vol.Required("channel_id"): vol.Coerce(int),
+        vol.Required("requester_discord_id"): vol.Coerce(int),
+        vol.Required("domain"): str,
+        vol.Required("service"): str,
+        vol.Optional("service_data", default=dict): dict,
+        vol.Optional("description", default=None): vol.Any(str, None),
+        vol.Optional("approvers", default=list): [vol.Coerce(int)],
+        vol.Optional("self_approve", default=None): vol.Any(bool, None),
+        vol.Optional("ttl_minutes", default=None): vol.Any(vol.Coerce(float), None),
+    }
+)
+
+
+def _async_register_services(hass: HomeAssistant) -> None:
+    """Register the domain services (once, however many entries exist)."""
+    if hass.services.has_service(DOMAIN, SERVICE_REQUEST_APPROVAL):
+        return
+
+    async def _request_approval(call: ServiceCall) -> None:
+        try:
+            data: dict[str, Any] = _REQUEST_APPROVAL_SCHEMA(dict(call.data))
+        except vol.Invalid as err:
+            raise ServiceValidationError(f"Invalid approval request: {err}") from err
+        entry = hass.config_entries.async_get_entry(data["config_entry_id"])
+        if (
+            entry is None
+            or entry.domain != DOMAIN
+            or entry.state is not ConfigEntryState.LOADED
+        ):
+            raise ServiceValidationError(
+                f"Discord Assist entry {data['config_entry_id']} is not loaded"
+            )
+        kwargs: dict[str, Any] = {
+            "channel_id": data["channel_id"],
+            "requester_discord_id": data["requester_discord_id"],
+            "domain": data["domain"],
+            "service": data["service"],
+            "service_data": data["service_data"],
+            "description": data["description"],
+            "approvers": data["approvers"],
+            "self_approve": data["self_approve"],
+        }
+        if data["ttl_minutes"] is not None:
+            kwargs["ttl_minutes"] = data["ttl_minutes"]
+        await entry.runtime_data.approvals.async_request_approval(**kwargs)
+
+    hass.services.async_register(DOMAIN, SERVICE_REQUEST_APPROVAL, _request_approval)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> bool:
     """Set up Discord Assist from a config entry."""
     router = ConversationRouter.from_entry(hass, entry)
+    approval_store = ApprovalStore(hass, entry.entry_id)
+    await approval_store.async_load()
+    approvals = ApprovalManager(
+        hass,
+        entry.entry_id,
+        router,
+        approval_store,
+        ApprovalPolicy.from_options(entry.options),
+    )
     if not router.has_authorized_users:
         _LOGGER.warning(
             "No Discord users are authorized for %s; the bot will ignore everyone "
@@ -71,6 +146,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
     _set_issue(hass, entry, ISSUE_MESSAGE_CONTENT_INTENT, False)
 
     client = DiscordAssistClient(hass, router, signal_connection(entry.entry_id))
+    approvals.bind_client(client)
+    client.approvals = approvals
     # Log in over REST first so a dead network or bad token surfaces here,
     # where Home Assistant retries with backoff or starts reauth.
     try:
@@ -82,7 +159,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         await client.close()
         raise ConfigEntryNotReady(f"Could not reach Discord: {err}") from err
 
-    entry.runtime_data = RuntimeData(client=client, router=router)
+    entry.runtime_data = RuntimeData(client=client, router=router, approvals=approvals)
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass, approvals.async_expire_sweep, APPROVAL_SWEEP_INTERVAL
+        )
+    )
+    _async_register_services(hass)
 
     async def _run() -> None:
         try:
@@ -119,6 +202,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> 
     """Unload a config entry."""
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     await entry.runtime_data.client.close()
+    if unloaded and not any(
+        other.entry_id != entry.entry_id
+        for other in hass.config_entries.async_loaded_entries(DOMAIN)
+    ):
+        # The last loaded entry owns the domain service registration.
+        hass.services.async_remove(DOMAIN, SERVICE_REQUEST_APPROVAL)
     return unloaded
 
 

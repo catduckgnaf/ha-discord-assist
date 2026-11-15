@@ -19,6 +19,8 @@
           "idle_minutes": "Reset a conversation after this many idle minutes",
           "language": "Language (blank = Home Assistant default)",
           "allowlist": "Allowed Discord user IDs (act as the fallback user; mapped users are always allowed)",
+          "confirm_domains": "Service domains that need Discord approval before running (for example lock, cover, climate)",
+          "approvers": "Discord user IDs who can approve sensitive actions",
           "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
           "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
           "agent_timeout": "Give up on the agent after this many seconds"
@@ -78,6 +80,8 @@
           "idle_minutes": "Reset a conversation after this many idle minutes",
           "language": "Language (blank = Home Assistant default)",
           "allowlist": "Allowed Discord user IDs (act as the fallback user; mapped users are always allowed)",
+          "confirm_domains": "Service domains that need Discord approval before running (for example lock, cover, climate)",
+          "approvers": "Discord user IDs who can approve sensitive actions",
           "fallback_ha_user": "Fallback Home Assistant user for unmapped Discord users",
           "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
           "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
@@ -120,6 +124,54 @@
     "binary_sensor": {
       "gateway": {
         "name": "Discord gateway"
+      }
+    }
+  },
+  "services": {
+    "request_approval": {
+      "name": "Request approval",
+      "description": "Post Approve and Deny buttons in a Discord channel for a service call. The call runs, as the requesting Discord user's Home Assistant user, only if the requester or an approver presses Approve before the request expires.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry ID",
+          "description": "The Discord Assist config entry whose bot posts the buttons."
+        },
+        "channel_id": {
+          "name": "Channel ID",
+          "description": "The Discord channel to post the approval request in."
+        },
+        "requester_discord_id": {
+          "name": "Requester Discord user ID",
+          "description": "The Discord user the action is for. On approval the service call runs as this user's mapped Home Assistant user."
+        },
+        "domain": {
+          "name": "Domain",
+          "description": "The service domain to call on approval, for example lock."
+        },
+        "service": {
+          "name": "Service",
+          "description": "The service to call on approval, for example unlock."
+        },
+        "service_data": {
+          "name": "Service data",
+          "description": "The service call data, for example an entity_id."
+        },
+        "description": {
+          "name": "Description",
+          "description": "What the buttons ask about, shown in the Discord message."
+        },
+        "approvers": {
+          "name": "Approvers",
+          "description": "Extra Discord user IDs who may approve or deny this request, on top of the configured approvers."
+        },
+        "self_approve": {
+          "name": "Requester can approve",
+          "description": "Whether the requester may approve their own request. By default the requester cannot self-approve locks and alarm panels; an approver has to confirm those."
+        },
+        "ttl_minutes": {
+          "name": "Expires after (minutes)",
+          "description": "How long the buttons stay live before the request expires unexecuted."
+        }
       }
     }
   },

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 import discord
 from homeassistant.core import HomeAssistant
@@ -15,6 +16,9 @@ from .conversation_router import (
     make_conversation_key,
 )
 from .text_utils import chunk_message, strip_self_mention
+
+if TYPE_CHECKING:
+    from .approvals import ApprovalManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -40,6 +44,8 @@ class DiscordAssistClient(discord.Client):
         self.router = router
         self.connected = False
         self._status_signal = status_signal
+        # Set by async_setup_entry; None until then (and in unit tests).
+        self.approvals: ApprovalManager | None = None
 
     def _set_connected(self, connected: bool) -> None:
         if connected != self.connected:
@@ -54,6 +60,11 @@ class DiscordAssistClient(discord.Client):
 
     async def on_disconnect(self) -> None:
         self._set_connected(False)
+
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """Route component presses; approvals are the only components today."""
+        if self.approvals is not None:
+            await self.approvals.async_handle_interaction(interaction)
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author == self.user or message.author.bot:

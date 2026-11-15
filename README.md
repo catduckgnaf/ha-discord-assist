@@ -110,6 +110,8 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for what is planned to make this easier.
 | Speaker context | Yes | Sends the agent the speaker's Discord name and Home Assistant user, the channel, the room (for room channels), and the local time, as extra system prompt text. Agents that ignore extra prompt text are unaffected |
 | Built-in commands first | No | Tries `conversation.home_assistant` first and only asks your agent when the built-in agent does not understand the request or finds no matching device. A command it matched but failed is not retried, so nothing runs twice |
 | Agent timeout | 60 s | Gives up and says so instead of typing forever |
+| Approval domains | (none) | Service domains (for example `lock`, `cover`, `climate`) that automations and tools should route through `discord_assist.request_approval` instead of calling directly |
+| Approvers | (none) | Discord user IDs who can approve or deny approval requests, on top of the requester |
 
 ## Room channels
 
@@ -133,6 +135,30 @@ Map a Discord user ID to a specific Home Assistant user so commands run with tha
 ### Fallback user
 
 Set **Fallback Home Assistant user** in options to control which HA user is used for Discord users who have no explicit mapping. Use a dedicated, least-privilege account for this.
+
+## Approval buttons
+
+Sensitive actions can wait for a human press instead of running right away. The `discord_assist.request_approval` service takes the service call you want gated (domain, service, service data), the Discord channel to ask in, and the Discord user who asked. It posts **Approve** / **Deny** buttons and does not run anything yet.
+
+- Only the requester or an approver (the **Approvers** option, plus any approvers named on the request) can press. Anyone else is refused and the request stays open.
+- For `lock` and `alarm_control_panel`, the requester cannot approve their own request by default; an approver has to confirm. A request can override this with `self_approve`.
+- **Approve** runs the stored service call exactly once, as the *requester's* Home Assistant user, so permissions and the audit trail point at the requester. **Deny** and expiry run nothing. Either way the buttons are removed and the message shows the outcome.
+- Every step (requested, approved, denied, expired, refused, failed) fires a `discord_assist_approval` event with the requester, the presser, and the domain, for automations and the logbook.
+
+An automation for a lock might look like:
+
+```yaml
+action: discord_assist.request_approval
+data:
+  config_entry_id: "<your entry id>"
+  channel_id: "123456789012345678"
+  requester_discord_id: "234567890123456789"
+  domain: lock
+  service: unlock
+  service_data:
+    entity_id: lock.front_door
+  description: "Unlock the front door?"
+```
 
 ## Development
 
