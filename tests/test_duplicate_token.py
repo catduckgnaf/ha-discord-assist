@@ -162,7 +162,7 @@ async def test_edited_and_interaction_sent_messages_do_not_raise(monkeypatch):
     # A message we sent and later edited keeps id 7001.
     client.record_sent_message(SimpleNamespace(id=7001))
     # An interaction response sent by this process records id 7002 through
-    # the same central recording used by _send_to_channel.
+    # the same central recording used by send_to_channel.
     client.record_sent_message(SimpleNamespace(id=7002))
     with patch(
         "custom_components.discord_assist.bot.ir.async_create_issue"
@@ -176,7 +176,7 @@ async def test_send_to_channel_records_sent_message(monkeypatch):
     client = _client(_router(), monkeypatch)
     channel = MagicMock()
     channel.send = AsyncMock(return_value=SimpleNamespace(id=8001))
-    sent = await client._send_to_channel(channel, "hi")
+    sent = await client.send_to_channel(channel, "hi")
     assert sent.id == 8001
     assert 8001 in client._sent_message_ids
 

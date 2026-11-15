@@ -34,7 +34,7 @@ from .recent_errors import RecentErrors
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.BINARY_SENSOR]
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.NOTIFY]
 
 
 @dataclass

@@ -208,7 +208,7 @@ class DiscordAssistClient(discord.Client):
         """Remember a message this process sent, by id.
 
         Every send path in this client goes through here (see
-        ``_send_to_channel``), so chunked replies are all recorded. An
+        ``send_to_channel``), so chunked replies are all recorded. An
         edit keeps the original message id, so an edited reply stays
         recorded, and any future interaction-response or webhook send
         must record its returned message here as well. That is what
@@ -231,7 +231,7 @@ class DiscordAssistClient(discord.Client):
         while len(self._sent_nonce_order) > MAX_TRACKED_SENT_MESSAGES:
             self._sent_nonces.discard(self._sent_nonce_order.popleft())
 
-    async def _send_to_channel(self, channel: Any, content: str, **kwargs: Any) -> Any:
+    async def send_to_channel(self, channel: Any, content: str, **kwargs: Any) -> Any:
         """Send through the one central path and record the sent message.
 
         The gateway echo of our own message can reach ``on_message``
@@ -248,7 +248,7 @@ class DiscordAssistClient(discord.Client):
         """Whether a message from our bot user came from this process.
 
         Interaction responses and webhook posts are authored by the bot
-        user but never go through ``_send_to_channel``; they are ours too.
+        user but never go through ``send_to_channel``; they are ours too.
         """
         if getattr(message, "id", None) in self._sent_message_ids:
             return True
@@ -633,7 +633,7 @@ class DiscordAssistClient(discord.Client):
         for part in chunk_message(reply):
             try:
                 if reference is not None:
-                    await self._send_to_channel(
+                    await self.send_to_channel(
                         message.channel,
                         part,
                         reference=reference,
@@ -641,7 +641,7 @@ class DiscordAssistClient(discord.Client):
                     )
                     reference = None
                 else:
-                    await self._send_to_channel(message.channel, part)
+                    await self.send_to_channel(message.channel, part)
             except discord.HTTPException as err:
                 self.recent_errors.record(err, source="send_reply")
                 _LOGGER.warning(
@@ -656,13 +656,13 @@ class DiscordAssistClient(discord.Client):
         reference = message.to_reference(fail_if_not_exists=False)
         try:
             if reference is not None:
-                return await self._send_to_channel(
+                return await self.send_to_channel(
                     message.channel,
                     PLACEHOLDER_REPLY,
                     reference=reference,
                     mention_author=False,
                 )
-            return await self._send_to_channel(message.channel, PLACEHOLDER_REPLY)
+            return await self.send_to_channel(message.channel, PLACEHOLDER_REPLY)
         except discord.HTTPException as err:
             self.recent_errors.record(err, source="placeholder")
             _LOGGER.warning(
@@ -700,7 +700,7 @@ class DiscordAssistClient(discord.Client):
             return
         for part in chunks[1:]:
             try:
-                await self._send_to_channel(message.channel, part)
+                await self.send_to_channel(message.channel, part)
             except discord.HTTPException as err:
                 self.recent_errors.record(err, source="send_reply")
                 _LOGGER.warning(
@@ -746,7 +746,7 @@ class DiscordAssistClient(discord.Client):
                 io.BytesIO(result.image_content), filename=result.filename
             )
         try:
-            await self._send_to_channel(message.channel, result.text, **kwargs)
+            await self.send_to_channel(message.channel, result.text, **kwargs)
         except discord.HTTPException as err:
             self.recent_errors.record(err, source="snapshot")
             _LOGGER.warning(
