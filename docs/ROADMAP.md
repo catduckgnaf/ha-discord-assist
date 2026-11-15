@@ -217,9 +217,10 @@ User mapping beats role mapping; deny beats allow; no match means ignored
 - Should profiles also restrict which conversation history a user can see in
   shared channels?
 
-## Proposed 0.3.1
+## 0.3.1 (built)
 
-Already merged: manifest categories.
+All of the list below is done. Each roadmap item is also tracked as a GitHub
+issue.
 
 1. Brand icon and README refresh.
 2. Speaker and place context via `extra_system_prompt` (1).

@@ -17,6 +17,8 @@ from homeassistant.config_entries import (
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.selector import (
     BooleanSelector,
+    DeviceSelector,
+    DeviceSelectorConfig,
     EntityFilterSelectorConfig,
     EntitySelector,
     EntitySelectorConfig,
@@ -34,19 +36,26 @@ from homeassistant.helpers.selector import (
 
 from .const import (
     CONF_AGENT_ID,
+    CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
     CONF_BOT_ID,
     CONF_CHANNELS,
     CONF_FALLBACK_USER,
     CONF_IDLE_MINUTES,
     CONF_LANGUAGE,
+    CONF_PREFER_LOCAL,
     CONF_RESPOND_DMS,
     CONF_RESPOND_MENTIONS,
+    CONF_ROOM_MAP,
+    CONF_SPEAKER_CONTEXT,
     CONF_TOKEN,
     CONF_USER_MAP,
+    DEFAULT_AGENT_TIMEOUT,
     DEFAULT_IDLE_MINUTES,
+    DEFAULT_PREFER_LOCAL,
     DEFAULT_RESPOND_DMS,
     DEFAULT_RESPOND_MENTIONS,
+    DEFAULT_SPEAKER_CONTEXT,
     DOMAIN,
     LEGACY_DOMAIN,
 )
@@ -91,6 +100,23 @@ def build_config_schema(channel_options: list[SelectOptionDict]) -> vol.Schema:
             vol.Optional(CONF_LANGUAGE, default=""): TextSelector(),
             vol.Optional(CONF_ALLOWLIST, default=[]): SelectSelector(
                 SelectSelectorConfig(options=[], multiple=True, custom_value=True)
+            ),
+            vol.Optional(
+                CONF_SPEAKER_CONTEXT, default=DEFAULT_SPEAKER_CONTEXT
+            ): BooleanSelector(),
+            vol.Optional(
+                CONF_PREFER_LOCAL, default=DEFAULT_PREFER_LOCAL
+            ): BooleanSelector(),
+            vol.Optional(
+                CONF_AGENT_TIMEOUT, default=DEFAULT_AGENT_TIMEOUT
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=5,
+                    max=600,
+                    step=1,
+                    mode=NumberSelectorMode.BOX,
+                    unit_of_measurement="s",
+                )
             ),
         }
     )
@@ -243,14 +269,27 @@ async def _ha_user_options(hass: HomeAssistant) -> list[SelectOptionDict]:
 
 
 class DiscordAssistOptionsFlow(OptionsFlowWithReload):
-    """Options: general settings and Discord->HA user mappings."""
+    """Options: general settings, user mappings, and room channels."""
+
+    async def _channel_options(self) -> list[SelectOptionDict]:
+        try:
+            channels = await list_text_channels(self.config_entry.data[CONF_TOKEN])
+        except InvalidAuth, CannotConnect:
+            channels = []
+        return [SelectOptionDict(value=cid, label=label) for cid, label in channels]
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         return self.async_show_menu(
             step_id="init",
-            menu_options=["settings", "add_user_map", "remove_user_map"],
+            menu_options=[
+                "settings",
+                "add_user_map",
+                "remove_user_map",
+                "add_room",
+                "remove_room",
+            ],
         )
 
     async def async_step_settings(
@@ -262,13 +301,7 @@ class DiscordAssistOptionsFlow(OptionsFlowWithReload):
             merged[CONF_LANGUAGE] = merged.get(CONF_LANGUAGE) or None
             return self.async_create_entry(title="", data=merged)
 
-        try:
-            channels = await list_text_channels(self.config_entry.data[CONF_TOKEN])
-        except InvalidAuth, CannotConnect:
-            channels = []
-        channel_options = [
-            SelectOptionDict(value=cid, label=label) for cid, label in channels
-        ]
+        channel_options = await self._channel_options()
         user_options = await _ha_user_options(self.hass)
         schema = build_config_schema(channel_options).extend(
             {
@@ -328,3 +361,53 @@ class DiscordAssistOptionsFlow(OptionsFlowWithReload):
 
         schema = vol.Schema({vol.Required("discord_user_id"): vol.In(sorted(user_map))})
         return self.async_show_form(step_id="remove_user_map", data_schema=schema)
+
+    async def async_step_add_room(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Treat a Discord channel as a room: requests there act like a satellite.
+
+        The device's area becomes the default room, the same way a voice
+        satellite in that area works. Threads inherit their channel's room.
+        """
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            channel_id = str(user_input["channel_id"]).strip()
+            if not channel_id.isdigit():
+                errors["base"] = "invalid_channel_id"
+            else:
+                merged = dict(self.config_entry.options)
+                room_map = dict(merged.get(CONF_ROOM_MAP, {}))
+                room_map[channel_id] = user_input["device_id"]
+                merged[CONF_ROOM_MAP] = room_map
+                return self.async_create_entry(title="", data=merged)
+
+        schema = vol.Schema(
+            {
+                vol.Required("channel_id"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=await self._channel_options(),
+                        custom_value=True,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required("device_id"): DeviceSelector(DeviceSelectorConfig()),
+            }
+        )
+        return self.async_show_form(
+            step_id="add_room", data_schema=schema, errors=errors
+        )
+
+    async def async_step_remove_room(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        room_map = dict(self.config_entry.options.get(CONF_ROOM_MAP, {}))
+        if user_input is not None:
+            room_map.pop(str(user_input["channel_id"]), None)
+            merged = dict(self.config_entry.options)
+            merged[CONF_ROOM_MAP] = room_map
+            return self.async_create_entry(title="", data=merged)
+        if not room_map:
+            return self.async_abort(reason="no_rooms")
+        schema = vol.Schema({vol.Required("channel_id"): vol.In(sorted(room_map))})
+        return self.async_show_form(step_id="remove_room", data_schema=schema)

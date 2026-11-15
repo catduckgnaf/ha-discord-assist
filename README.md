@@ -15,6 +15,11 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 - Responds to @mentions in any channel the bot can see (optional)
 - Per-conversation context window with configurable idle timeout
 - Replies in threads under the channels it listens to
+- Tells the agent who is speaking, from which channel, and the local time
+- Room channels: a channel can stand for a room, so "close the blinds" in `#den` means the den
+- Optional local-first mode: Home Assistant's built-in commands answer instantly, the LLM handles the rest
+- One turn at a time per conversation, with a timeout instead of typing forever
+- Answers as Discord replies, and long code blocks split cleanly across messages
 - Maps Discord user IDs to Home Assistant users so commands run as the right person
 - Fails closed: Discord users it cannot run as a Home Assistant user are ignored
 - Replies can never ping `@everyone`, roles, or users
@@ -60,7 +65,7 @@ Requests never run without a Home Assistant user, so permissions always apply. U
 2. Name the application (e.g. "Home Assistant") and click **Create**.
 3. In the left sidebar, click **Bot**.
 4. Click **Add Bot** → **Yes, do it!**
-5. Under **Token**, click **Reset Token** and copy the token — you will need it during integration setup.
+5. Under **Token**, click **Reset Token** and copy the token; you will need it during integration setup.
 6. Under **Privileged Gateway Intents**, enable **Message Content Intent**. Without this, the bot cannot read message text in guild channels.
 
 ### Invite the bot to your server
@@ -99,9 +104,16 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for what is planned to make this easier.
 | Channels to listen in | (none) | Guild text channels where the bot responds to all messages |
 | Respond to direct messages | Yes | Whether to respond when users DM the bot |
 | Respond to @mentions anywhere | Yes | Whether to respond when the bot is @mentioned in any channel |
-| Idle minutes | 30 | Minutes of inactivity before conversation context resets |
+| Idle minutes | 15 | Minutes of inactivity before conversation context resets |
 | Language | (HA default) | BCP-47 language tag passed to the conversation agent |
 | Allowed Discord user IDs | (none) | Discord user IDs allowed to use the bot as the fallback user; mapped users are always allowed |
+| Speaker context | Yes | Sends the agent the speaker's Discord name and Home Assistant user, the channel, the room (for room channels), and the local time, as extra system prompt text. Agents that ignore extra prompt text are unaffected |
+| Built-in commands first | No | Tries `conversation.home_assistant` first and only asks your agent when the built-in agent does not understand the request or finds no matching device. A command it matched but failed is not retried, so nothing runs twice |
+| Agent timeout | 60 s | Gives up and says so instead of typing forever |
+
+## Room channels
+
+A voice satellite knows which room it is in; a Discord channel does not, unless you tell it. In options, choose **Treat a channel as a room**, pick the channel, and pick any device in that room's area. Messages in that channel and its threads are sent with that device, so the built-in agent and LLM agents using Home Assistant's Assist API treat the device's area as the default room. With speaker context on, the room name is also in the prompt for agents that read it.
 
 ## User mapping
 

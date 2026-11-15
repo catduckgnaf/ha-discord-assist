@@ -3,7 +3,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 
-from custom_components.discord_assist.bot import DiscordAssistClient
+from custom_components.discord_assist.bot import TIMEOUT_REPLY, DiscordAssistClient
+from custom_components.discord_assist.conversation_router import AgentTimeout
 
 
 def _message(
@@ -28,12 +29,19 @@ def _message(
     typing_cm.__aenter__ = AsyncMock()
     typing_cm.__aexit__ = AsyncMock(return_value=False)
     channel.typing = MagicMock(return_value=typing_cm)
-    return SimpleNamespace(
+    msg = SimpleNamespace(
         content=content,
         channel=channel,
-        author=SimpleNamespace(id=7, bot=author_bot),
+        author=SimpleNamespace(id=7, bot=author_bot, display_name="Catduck"),
         mentions=mentions or [],
     )
+    msg.ref = SimpleNamespace(message_id=1)
+    msg.to_reference = MagicMock(return_value=msg.ref)
+    return msg
+
+
+def _first_send(msg):
+    return msg.channel.send.await_args_list[0]
 
 
 def _client(router, monkeypatch):
@@ -56,7 +64,13 @@ async def test_on_message_dispatches_and_replies(monkeypatch):
     msg = _message("<@999> is the light on?", mentions=[SimpleNamespace(id=999)])
     await client.on_message(msg)
     router.process.assert_awaited_once()
-    msg.channel.send.assert_awaited_once_with("The light is on.")
+    msg.channel.send.assert_awaited_once_with(
+        "The light is on.", reference=msg.ref, mention_author=False
+    )
+    msg.to_reference.assert_called_once_with(fail_if_not_exists=False)
+    where = router.process.call_args.kwargs["where"]
+    assert where.display_name == "Catduck"
+    assert where.channel_id == 111
 
 
 async def test_on_message_ignores_other_bots(monkeypatch):
@@ -106,7 +120,9 @@ async def test_on_message_replies_when_typing_fails(monkeypatch):
     await client.on_message(msg)
 
     router.process.assert_awaited_once()
-    msg.channel.send.assert_awaited_once_with("Lights are off.")
+    msg.channel.send.assert_awaited_once_with(
+        "Lights are off.", reference=msg.ref, mention_author=False
+    )
 
 
 async def test_on_message_does_not_raise_when_send_fails(monkeypatch):
@@ -154,3 +170,53 @@ async def test_connection_state_dispatches_changes(monkeypatch):
         await client.on_disconnect()
         assert client.connected is False
     assert mock_send.call_count == 2
+
+
+async def test_on_message_replies_on_timeout(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.process = AsyncMock(side_effect=AgentTimeout())
+    client = _client(router, monkeypatch)
+    msg = _message("<@999> hi", mentions=[SimpleNamespace(id=999)])
+    await client.on_message(msg)
+    assert _first_send(msg).args[0] == TIMEOUT_REPLY
+
+
+async def test_long_reply_only_first_piece_is_a_reply(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.process = AsyncMock(return_value="word\n" * 1000)
+    client = _client(router, monkeypatch)
+    msg = _message("<@999> essay", mentions=[SimpleNamespace(id=999)])
+    await client.on_message(msg)
+    calls = msg.channel.send.await_args_list
+    assert len(calls) > 1
+    assert calls[0].kwargs == {"reference": msg.ref, "mention_author": False}
+    assert all(c.kwargs == {} for c in calls[1:])
+
+
+async def test_typing_failure_after_answer_does_not_rerun_agent(monkeypatch):
+    """If the typing indicator fails on exit, the agent must not run again."""
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.process = AsyncMock(return_value="Unlocked.")
+    client = _client(router, monkeypatch)
+    msg = _message("<@999> unlock", mentions=[SimpleNamespace(id=999)])
+    typing_cm = MagicMock()
+    typing_cm.__aenter__ = AsyncMock()
+    typing_cm.__aexit__ = AsyncMock(
+        side_effect=discord.HTTPException(MagicMock(), "gone")
+    )
+    msg.channel.typing = MagicMock(return_value=typing_cm)
+    await client.on_message(msg)
+    router.process.assert_awaited_once()
+    assert _first_send(msg).args[0] == "Unlocked."
+
+
+async def test_dm_has_no_channel_name(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.process = AsyncMock(return_value="hi")
+    client = _client(router, monkeypatch)
+    await client.on_message(_message("hello", is_dm=True))
+    assert router.process.call_args.kwargs["where"].channel_name is None

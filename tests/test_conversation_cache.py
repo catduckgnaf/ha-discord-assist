@@ -50,3 +50,16 @@ def test_set_none_clears_entry():
     cache.set("channel:1", "conv-abc")
     cache.set("channel:1", None)
     assert cache.get("channel:1") is None
+
+
+async def test_turn_locks_evict_idle_but_keep_held():
+    from custom_components.discord_assist.conversation_cache import TurnLocks
+
+    locks = TurnLocks(max_keys=2)
+    held = locks.get("a")
+    await held.acquire()
+    locks.get("b")
+    locks.get("c")  # evicts "b", the oldest idle lock; "a" is held
+    assert len(locks) == 2
+    assert locks.get("a") is held
+    held.release()

@@ -18,7 +18,10 @@
           "respond_mentions": "Respond to @mentions anywhere",
           "idle_minutes": "Reset a conversation after this many idle minutes",
           "language": "Language (blank = Home Assistant default)",
-          "allowlist": "Allowed Discord user IDs (act as the fallback user; mapped users are always allowed)"
+          "allowlist": "Allowed Discord user IDs (act as the fallback user; mapped users are always allowed)",
+          "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
+          "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
+          "agent_timeout": "Give up on the agent after this many seconds"
         }
       },
       "reauth_confirm": {
@@ -51,7 +54,8 @@
   },
   "options": {
     "error": {
-      "invalid_user_id": "That is not a valid Discord user ID (digits only)."
+      "invalid_user_id": "That is not a valid Discord user ID (digits only).",
+      "invalid_channel_id": "That is not a valid Discord channel ID (digits only)."
     },
     "step": {
       "init": {
@@ -59,7 +63,9 @@
         "menu_options": {
           "settings": "Conversation settings",
           "add_user_map": "Add a Discord-to-Home-Assistant user mapping",
-          "remove_user_map": "Remove a user mapping"
+          "remove_user_map": "Remove a user mapping",
+          "add_room": "Treat a channel as a room",
+          "remove_room": "Remove a room channel"
         }
       },
       "settings": {
@@ -72,7 +78,10 @@
           "idle_minutes": "Reset a conversation after this many idle minutes",
           "language": "Language (blank = Home Assistant default)",
           "allowlist": "Allowed Discord user IDs (act as the fallback user; mapped users are always allowed)",
-          "fallback_ha_user": "Fallback Home Assistant user for unmapped Discord users"
+          "fallback_ha_user": "Fallback Home Assistant user for unmapped Discord users",
+          "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
+          "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
+          "agent_timeout": "Give up on the agent after this many seconds"
         }
       },
       "add_user_map": {
@@ -87,7 +96,24 @@
         "data": {
           "discord_user_id": "Discord user ID"
         }
+      },
+      "add_room": {
+        "title": "Room channel",
+        "description": "Pick a device in the room this channel stands for (any device in that area works). Requests in the channel and its threads then default to that room, like a voice satellite.",
+        "data": {
+          "channel_id": "Discord channel",
+          "device_id": "Device in the room"
+        }
+      },
+      "remove_room": {
+        "title": "Remove room channel",
+        "data": {
+          "channel_id": "Discord channel ID"
+        }
       }
+    },
+    "abort": {
+      "no_rooms": "No channels are mapped to rooms."
     }
   },
   "entity": {

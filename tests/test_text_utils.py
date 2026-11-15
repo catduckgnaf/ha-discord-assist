@@ -27,6 +27,28 @@ def test_chunk_hard_splits_overlong_single_line():
     assert "".join(chunks) == "x" * 5000
 
 
+def test_chunk_keeps_code_blocks_balanced():
+    body = "".join(f"line {i}\n" for i in range(40))
+    text = f"intro\n```python\n{body}```\nafter\n"
+    chunks = chunk_message(text, limit=80)
+    assert len(chunks) > 2
+    for chunk in chunks:
+        assert len(chunk) <= 80
+        assert chunk.count("```") % 2 == 0
+    # Every continuation of the block reopens it with the language tag.
+    assert all(c.startswith("```python\n") for c in chunks[1:-1])
+    assert chunks[-1] == "after\n"
+
+
+def test_chunk_hard_splits_long_line_inside_code_block():
+    text = "```\n" + "y" * 300 + "\n```"
+    chunks = chunk_message(text, limit=100)
+    assert all(len(c) <= 100 for c in chunks)
+    assert all(c.count("```") == 2 for c in chunks)
+    joined = "".join(c.replace("```", "").replace("\n", "") for c in chunks)
+    assert joined == "y" * 300
+
+
 @pytest.mark.parametrize(
     ("content", "expected"),
     [

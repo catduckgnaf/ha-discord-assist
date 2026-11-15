@@ -11,6 +11,7 @@ from custom_components.discord_assist.const import (
     CONF_BOT_ID,
     CONF_CHANNELS,
     CONF_FALLBACK_USER,
+    CONF_ROOM_MAP,
     CONF_TOKEN,
     CONF_USER_MAP,
     DOMAIN,
@@ -44,6 +45,8 @@ async def test_options_menu_shown(hass: HomeAssistant):
         "settings",
         "add_user_map",
         "remove_user_map",
+        "add_room",
+        "remove_room",
     }
 
 
@@ -124,3 +127,66 @@ async def test_remove_user_mapping(hass: HomeAssistant):
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_USER_MAP] == {"8": "ha-user-2"}
+
+
+async def test_add_room_channel(hass: HomeAssistant):
+    entry = _entry(hass)
+    with patch(
+        "custom_components.discord_assist.config_flow.list_text_channels",
+        new=AsyncMock(return_value=[("555", "Home / #den")]),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "add_room"}
+        )
+        assert result["step_id"] == "add_room"
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"channel_id": "555", "device_id": "dev-den"}
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_ROOM_MAP] == {"555": "dev-den"}
+
+
+async def test_add_room_rejects_bad_channel_id(hass: HomeAssistant):
+    entry = _entry(hass)
+    with patch(
+        "custom_components.discord_assist.config_flow.list_text_channels",
+        new=AsyncMock(return_value=[]),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "add_room"}
+        )
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"channel_id": "den", "device_id": "dev-den"}
+        )
+    assert result["errors"] == {"base": "invalid_channel_id"}
+
+
+async def test_remove_room_channel(hass: HomeAssistant):
+    entry = _entry(
+        hass,
+        options={
+            CONF_AGENT_ID: "conversation.ollama",
+            CONF_USER_MAP: {},
+            CONF_ROOM_MAP: {"555": "dev-den", "556": "dev-kitchen"},
+        },
+    )
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "remove_room"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"channel_id": "555"}
+    )
+    assert entry.options[CONF_ROOM_MAP] == {"556": "dev-kitchen"}
+
+
+async def test_remove_room_aborts_when_none(hass: HomeAssistant):
+    entry = _entry(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "remove_room"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "no_rooms"

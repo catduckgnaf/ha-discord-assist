@@ -2,6 +2,26 @@
 
 ## 0.3.1
 
+### Added
+
+- Speaker context: the agent gets the speaker's Discord name, their Home Assistant user, the channel, the room, and the local time through `extra_system_prompt`. On by default; Discord names are cleaned to one short line.
+- Room channels: map a channel to a device in a room. Messages there, and in its threads, are sent with that `device_id`, so requests without a room mean that room.
+- Built-in commands first (off by default): tries `conversation.home_assistant`, falling back to the configured agent only when no intent matched or no device was found.
+- Agent timeout (60 s default) with a clear reply instead of an endless typing indicator.
+
+### Changed
+
+- One turn at a time per conversation: messages in the same channel or DM queue in order instead of racing on one conversation.
+- Answers are posted as Discord replies (without pinging the author). If the original message was deleted, the answer is posted normally.
+- Long answers split across messages keep code blocks intact: a block is closed at the end of one message and reopened, with its language, in the next.
+
+### Fixed
+
+- A typing indicator failure after the agent had answered could run the agent a second time, repeating any action it took.
+- README listed the idle reset default as 30 minutes; it is 15.
+
+### Packaging and docs
+
 - Add a brand icon in `custom_components/discord_assist/brand/` (Home Assistant 2026.3+ reads it locally; the brands repository no longer takes custom integrations).
 - README: Marketplace install instructions and badge (HACS is built into Home Assistant 2026.11 as the Marketplace), plus a "Getting good answers" guide for tuning LLM agents.
 - Add `docs/ROADMAP.md` with the improvement list and the per-user permissions scope.
