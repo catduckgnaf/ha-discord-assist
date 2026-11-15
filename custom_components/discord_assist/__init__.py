@@ -25,6 +25,7 @@ from .const import (
     signal_connection,
 )
 from .conversation_router import ConversationRouter
+from .llm_api import async_setup_llm_api
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -83,6 +84,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         raise ConfigEntryNotReady(f"Could not reach Discord: {err}") from err
 
     entry.runtime_data = RuntimeData(client=client, router=router)
+
+    # Permissions phase B: expose the scoped LLM API so agents serving
+    # Discord speakers can be limited to the speaker's scope.
+    async_setup_llm_api(hass, entry)
 
     async def _run() -> None:
         try:
