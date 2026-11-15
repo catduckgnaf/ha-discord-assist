@@ -13,6 +13,7 @@ from custom_components.discord_assist.const import (
     CONF_AGENT_ID,
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
+    CONF_EVENT_EXCLUDE_TEXT,
     CONF_PREFER_LOCAL,
     CONF_ROOM_MAP,
     CONF_USER_MAP,
@@ -369,3 +370,23 @@ def test_from_entry_reads_new_options():
     assert router.prefer_local is True
     assert router.agent_timeout == 30.0
     assert router.speaker_context is True
+
+
+def test_from_entry_reads_event_options_and_entry_id():
+    entry = SimpleNamespace(
+        entry_id="entry-abc",
+        options={
+            CONF_AGENT_ID: "conversation.ollama",
+            CONF_EVENT_EXCLUDE_TEXT: True,
+        },
+    )
+    router = ConversationRouter.from_entry(object(), entry)
+    assert router.config_entry_id == "entry-abc"
+    assert router.event_exclude_text is True
+
+
+def test_from_entry_event_defaults():
+    entry = SimpleNamespace(options={CONF_AGENT_ID: "conversation.ollama"})
+    router = ConversationRouter.from_entry(object(), entry)
+    assert router.config_entry_id is None
+    assert router.event_exclude_text is False

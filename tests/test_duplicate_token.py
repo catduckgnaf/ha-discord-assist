@@ -32,6 +32,7 @@ def _router(*, channels=None, respond_dms=True):
     router = MagicMock()
     router.channels = {CHANNEL_ID} if channels is None else channels
     router.respond_dms = respond_dms
+    router.config_entry_id = ENTRY_ID
     router.should_respond.return_value = True
     router.process = AsyncMock(return_value="The light is on.")
     return router
@@ -40,10 +41,9 @@ def _router(*, channels=None, respond_dms=True):
 def _client(router, monkeypatch):
     with patch("discord.Client.__init__", return_value=None):
         client = DiscordAssistClient(
-            hass=object(),
+            hass=SimpleNamespace(bus=SimpleNamespace(async_fire=MagicMock())),
             router=router,
             status_signal="test_signal",
-            entry_id=ENTRY_ID,
             entry_title="Mock Title",
         )
     monkeypatch.setattr(
@@ -257,3 +257,51 @@ async def test_no_legacy_entry_does_not_raise(hass: HomeAssistant):
         DOMAIN, issue_id(ISSUE_DUPLICATE_TOKEN, entry.entry_id)
     )
     assert issue is None
+
+
+async def test_echo_before_send_returns_is_matched_by_nonce(monkeypatch):
+    """The gateway echo can beat send()'s response; the nonce covers it."""
+    router = _router()
+    client = _client(router, monkeypatch)
+    incoming = _message(10, author_id=7)
+    incoming.author = SimpleNamespace(id=7, bot=False, display_name="Catduck")
+    incoming.content = "<@999> hi"
+    incoming.mentions = [SimpleNamespace(id=BOT_ID)]
+
+    with patch(
+        "custom_components.discord_assist.bot.ir.async_create_issue"
+    ) as mock_create:
+
+        async def send_with_early_echo(content, **kwargs):
+            # Deliver our own echo while the REST call is still "in flight".
+            echo = _message(6000)
+            echo.nonce = kwargs["nonce"]
+            await client.on_message(echo)
+            return SimpleNamespace(id=6000)
+
+        incoming.channel.send = AsyncMock(side_effect=send_with_early_echo)
+        await client.on_message(incoming)
+    assert _create_issue_calls(mock_create) == []
+    assert incoming.channel.send.await_args.kwargs["nonce"]
+
+
+@pytest.mark.parametrize("field", ["interaction_metadata", "webhook_id"])
+async def test_interaction_and_webhook_messages_do_not_raise(monkeypatch, field):
+    client = _client(_router(), monkeypatch)
+    msg = _message(7000)
+    setattr(msg, field, SimpleNamespace(id=1) if field != "webhook_id" else 123)
+    with patch(
+        "custom_components.discord_assist.bot.ir.async_create_issue"
+    ) as mock_create:
+        await client.on_message(msg)
+    assert _create_issue_calls(mock_create) == []
+
+
+async def test_message_signal_is_a_warning(monkeypatch):
+    client = _client(_router(), monkeypatch)
+    with patch(
+        "custom_components.discord_assist.bot.ir.async_create_issue"
+    ) as mock_create:
+        await client.on_message(_message(4242))
+    (call,) = _create_issue_calls(mock_create)
+    assert call.kwargs["severity"] == ir.IssueSeverity.WARNING

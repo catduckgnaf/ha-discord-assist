@@ -20,8 +20,12 @@
           "language": "Language (blank = Home Assistant default)",
           "allowlist": "Allowed Discord user IDs (act as the fallback user; mapped users are always allowed)",
           "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
+          "event_exclude_text": "Exclude message text from the discord_assist_message event (event data is stored by the recorder)",
           "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
-          "agent_timeout": "Give up on the agent after this many seconds"
+          "agent_timeout": "Give up on the agent after this many seconds",
+          "rate_limit_per_minute": "Max requests per Discord user per minute (0 = no limit)",
+          "rate_limit_burst": "Requests a Discord user may send in a burst before the limit applies",
+          "placeholder_delay": "Show a working placeholder after this many seconds"
         }
       },
       "reauth_confirm": {
@@ -80,8 +84,12 @@
           "allowlist": "Allowed Discord user IDs (act as the fallback user; mapped users are always allowed)",
           "fallback_ha_user": "Fallback Home Assistant user for unmapped Discord users",
           "speaker_context": "Tell the agent who is speaking, from which channel, and the local time",
+          "event_exclude_text": "Exclude message text from the discord_assist_message event (event data is stored by the recorder)",
           "prefer_local": "Try Home Assistant's built-in commands first, then the agent",
-          "agent_timeout": "Give up on the agent after this many seconds"
+          "agent_timeout": "Give up on the agent after this many seconds",
+          "rate_limit_per_minute": "Max requests per Discord user per minute (0 = no limit)",
+          "rate_limit_burst": "Requests a Discord user may send in a burst before the limit applies",
+          "placeholder_delay": "Show a working placeholder after this many seconds"
         }
       },
       "add_user_map": {
@@ -134,7 +142,7 @@
     },
     "duplicate_token": {
       "title": "{entry_title} bot token is also running elsewhere",
-      "description": "A message from this bot was seen that this Home Assistant instance did not send, or a Discord Conversation entry with the same bot token is loaded. That means the same bot token is running in another process, such as the old Discord Conversation integration or a test bot. Both processes receive every message, both may answer, and actions may run twice. Stop the other process, or disable or remove the entry that uses the same token, then reload this integration."
+      "description": "A message from this bot was seen that this Home Assistant instance did not send, or a Discord Conversation entry with the same bot token is loaded. That means the same bot token is used somewhere else. If it is another gateway client, such as the old Discord Conversation integration or a test bot, both receive every message, both may answer, and actions may run twice: stop it, or disable or remove the entry that uses the same token, then reload this integration. Home Assistant's Discord notify integration with the same token also triggers this; it only sends messages, so it is harmless, but a separate bot token for it avoids the warning."
     }
   }
 }
