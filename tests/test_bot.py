@@ -9,6 +9,7 @@ from custom_components.discord_assist.bot import (
     ERROR_REPLY,
     PLACEHOLDER_REPLY,
     RATE_LIMIT_REPLY,
+    RESET_REPLY,
     TIMEOUT_REPLY,
     DiscordAssistClient,
 )
@@ -623,3 +624,80 @@ async def test_accepted_message_fires_event_on_real_bus(hass, monkeypatch):
     assert events[0].data["text"] == "movie time"
     assert events[0].data["config_entry_id"] == "entry-real"
     assert events[0].context.user_id == "ha-a"
+
+
+async def test_typing_failure_after_answer_does_not_rerun_agent(monkeypatch):
+    """If the typing indicator fails on exit, the agent must not run again."""
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.process = AsyncMock(return_value="Unlocked.")
+    client = _client(router, monkeypatch)
+    msg = _message("<@999> unlock", mentions=[SimpleNamespace(id=999)])
+    typing_cm = MagicMock()
+    typing_cm.__aenter__ = AsyncMock()
+    typing_cm.__aexit__ = AsyncMock(
+        side_effect=discord.HTTPException(MagicMock(), "gone")
+    )
+    msg.channel.typing = MagicMock(return_value=typing_cm)
+    await client.on_message(msg)
+    router.process.assert_awaited_once()
+    assert _first_send(msg).args[0] == "Unlocked."
+
+
+def _reset_router(**kwargs):
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.agent_for.return_value = None
+    router.conversation_scope = "channel"
+    router.conversation_key.side_effect = lambda **kw: (
+        ConversationRouter.conversation_key(router, **kw)
+    )
+    router.reset_conversation = AsyncMock()
+    router.process = AsyncMock(return_value="agent reply")
+    for key, value in kwargs.items():
+        setattr(router, key, value)
+    return router
+
+
+async def test_reset_command_clears_conversation_without_agent(monkeypatch):
+    router = _reset_router()
+    client = _client(router, monkeypatch)
+    msg = _message("<@999> Reset", mentions=[FakeUser(id=999)])
+    await client.on_message(msg)
+    router.reset_conversation.assert_awaited_once_with("channel:111")
+    router.process.assert_not_called()
+    assert _first_send(msg).content == RESET_REPLY == "Started a fresh conversation."
+
+
+async def test_reset_command_in_dm_uses_dm_key(monkeypatch):
+    router = _reset_router()
+    client = _client(router, monkeypatch)
+    msg = _message("RESET", is_dm=True)
+    await client.on_message(msg)
+    router.reset_conversation.assert_awaited_once_with("dm:7")
+    router.process.assert_not_called()
+    assert _first_send(msg).content == RESET_REPLY
+
+
+async def test_reset_from_unauthorized_user_is_ignored(monkeypatch):
+    """should_respond turns unauthorized users away before reset is seen."""
+    router = _reset_router()
+    router.should_respond.return_value = False
+    client = _client(router, monkeypatch)
+    msg = _message("reset")
+    await client.on_message(msg)
+    router.reset_conversation.assert_not_called()
+    router.process.assert_not_called()
+    assert msg.channel.send_calls == []
+
+
+async def test_reset_mid_sentence_goes_to_agent(monkeypatch):
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.process = AsyncMock(return_value="Reset the lights.")
+    client = _client(router, monkeypatch)
+    msg = _message("please reset the lights")
+    await client.on_message(msg)
+    router.reset_conversation.assert_not_called()
+    router.process.assert_awaited_once()
+    assert router.process.call_args.kwargs["text"] == "please reset the lights"

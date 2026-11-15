@@ -27,6 +27,7 @@ from .conversation_router import (
     ConversationRouter,
     MessageContext,
     RateLimited,
+    is_reset_command,
 )
 from .recent_errors import RecentErrors
 from .text_utils import chunk_message, strip_self_mention
@@ -36,6 +37,7 @@ _LOGGER = logging.getLogger(__name__)
 ERROR_REPLY = "Sorry, I hit an error talking to Home Assistant."
 EMPTY_REPLY = "(no response)"
 TIMEOUT_REPLY = "Sorry, Home Assistant took too long to answer. Try again?"
+RESET_REPLY = "Started a fresh conversation."
 RATE_LIMIT_REPLY = (
     "Slow down: you are sending requests too quickly. Please wait a bit and try again."
 )
@@ -477,6 +479,12 @@ class DiscordAssistClient(discord.Client):
             author_id=message.author.id,
             parent_id=parent_id,
         )
+        if is_reset_command(text):
+            # Only reachable by authorized users: should_respond above has
+            # already turned everyone else away, like any other message.
+            await self.router.reset_conversation(key)
+            await self._send_reply(message, RESET_REPLY)
+            return
         where = MessageContext(
             display_name=getattr(message.author, "display_name", None),
             channel_name=None if is_dm else getattr(message.channel, "name", None),

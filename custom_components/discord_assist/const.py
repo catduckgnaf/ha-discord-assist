@@ -25,6 +25,7 @@ CONF_PREFER_LOCAL = "prefer_local"
 CONF_AGENT_TIMEOUT = "agent_timeout"
 CONF_PLACEHOLDER_DELAY = "placeholder_delay"
 CONF_ROOM_MAP = "room_map"
+CONF_CHANNEL_IDLE_MINUTES = "channel_idle_minutes"
 CONF_CONVERSATION_SCOPE = "conversation_scope"
 
 # Conversation keying in channels: one shared conversation per channel, or

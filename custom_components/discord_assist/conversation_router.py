@@ -22,6 +22,7 @@ from .const import (
     CONF_AGENT_MAP_USER,
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
+    CONF_CHANNEL_IDLE_MINUTES,
     CONF_CHANNELS,
     CONF_CONVERSATION_SCOPE,
     CONF_EVENT_EXCLUDE_TEXT,
@@ -116,6 +117,33 @@ def _coerce_int_keys(mapping, field_name) -> dict[int, str]:
     return result
 
 
+def _coerce_int_map(mapping, field_name) -> dict[int, int]:
+    """Coerce a mapping to int keys and positive int values, skipping bad ones."""
+    result: dict[int, int] = {}
+    for key, value in (mapping or {}).items():
+        try:
+            channel_id = int(key)
+            minutes = int(value)
+        except TypeError, ValueError:
+            _LOGGER.warning("Ignoring non-numeric %s entry: %r", field_name, key)
+            continue
+        if minutes <= 0:
+            _LOGGER.warning("Ignoring non-positive %s entry: %r", field_name, key)
+            continue
+        result[channel_id] = minutes
+    return result
+
+
+def is_reset_command(text: str) -> bool:
+    """True only when the whole message is the word "reset" (any case).
+
+    The text has already had the bot's own mention stripped. A message that
+    merely contains the word, like "please reset the lights", is an ordinary
+    message for the agent, not a command.
+    """
+    return text.strip().casefold() == "reset"
+
+
 def _coerce_int_option(opts, key: str, default: int) -> int:
     try:
         return int(opts.get(key, default))
@@ -193,6 +221,7 @@ class ConversationRouter:
     fallback_user: str | None
     cache: ConversationCache
     room_map: dict[int, str] = field(default_factory=dict)
+    channel_idle_minutes: dict[int, int] = field(default_factory=dict)
     agent_map_user: dict[int, str] = field(default_factory=dict)
     agent_map_channel: dict[int, str] = field(default_factory=dict)
     speaker_context: bool = DEFAULT_SPEAKER_CONTEXT
@@ -232,6 +261,25 @@ class ConversationRouter:
         ):
             return None
         return resolve_ha_user_id(self.user_map, self.fallback_user, discord_user_id)
+
+    async def reset_conversation(self, conversation_key: str) -> None:
+        """Forget the cached conversation id for a key (the `reset` command).
+
+        The next message for this key passes no conversation id, so the agent
+        starts a new conversation. Taken under the key's turn lock, so an
+        in-flight turn cannot write the old id back after the reset.
+        """
+        async with self.turns.hold(conversation_key):
+            self.cache.reset(conversation_key)
+
+    def idle_ttl_for(
+        self, channel_id: int | None, parent_id: int | None = None
+    ) -> timedelta | None:
+        """Per-channel idle override for a channel (threads inherit), if any."""
+        for candidate in (channel_id, parent_id):
+            if candidate is not None and candidate in self.channel_idle_minutes:
+                return timedelta(minutes=self.channel_idle_minutes[candidate])
+        return None
 
     def device_for(self, channel_id: int | None, parent_id: int | None) -> str | None:
         """Device standing in for the room a channel (or its thread) represents."""
@@ -384,7 +432,10 @@ class ConversationRouter:
         result = await async_converse(
             self.hass,
             text,
-            self.cache.get(conversation_key),
+            self.cache.get(
+                conversation_key,
+                ttl=self.idle_ttl_for(where.channel_id, where.parent_id),
+            ),
             context,
             language=self.language,
             agent_id=agent_id,
@@ -431,6 +482,9 @@ class ConversationRouter:
     @classmethod
     def from_entry(cls, hass: HomeAssistant, entry: ConfigEntry) -> ConversationRouter:
         opts = entry.options
+        channel_idle = _coerce_int_map(
+            opts.get(CONF_CHANNEL_IDLE_MINUTES), "channel idle minutes"
+        )
         scope = opts.get(CONF_CONVERSATION_SCOPE, DEFAULT_CONVERSATION_SCOPE)
         if scope not in CONVERSATION_SCOPES:
             _LOGGER.warning(
@@ -450,9 +504,10 @@ class ConversationRouter:
             user_map=_coerce_int_keys(opts.get(CONF_USER_MAP), "Discord user id"),
             fallback_user=opts.get(CONF_FALLBACK_USER) or None,
             cache=ConversationCache(
-                timedelta(minutes=opts.get(CONF_IDLE_MINUTES, DEFAULT_IDLE_MINUTES))
+                timedelta(minutes=opts.get(CONF_IDLE_MINUTES, DEFAULT_IDLE_MINUTES)),
             ),
             room_map=_coerce_int_keys(opts.get(CONF_ROOM_MAP), "room channel id"),
+            channel_idle_minutes=channel_idle,
             agent_map_user=_coerce_int_keys(
                 opts.get(CONF_AGENT_MAP_USER), "agent Discord user id"
             ),

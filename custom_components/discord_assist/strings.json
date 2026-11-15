@@ -60,7 +60,8 @@
   "options": {
     "error": {
       "invalid_user_id": "That is not a valid Discord user ID (digits only).",
-      "invalid_channel_id": "That is not a valid Discord channel ID (digits only)."
+      "invalid_channel_id": "That is not a valid Discord channel ID (digits only).",
+      "invalid_idle_minutes": "Idle minutes must be a whole number between 1 and 240."
     },
     "step": {
       "init": {
@@ -71,6 +72,8 @@
           "remove_user_map": "Remove a user mapping",
           "add_room": "Treat a channel as a room",
           "remove_room": "Remove a room channel",
+          "add_channel_idle": "Set a per-channel idle reset",
+          "remove_channel_idle": "Remove a per-channel idle reset",
           "add_agent_user": "Use a specific agent for a Discord user",
           "remove_agent_user": "Remove a per-user agent",
           "add_agent_channel": "Use a specific agent in a channel",
@@ -125,6 +128,20 @@
           "channel_id": "Discord channel ID"
         }
       },
+      "add_channel_idle": {
+        "title": "Per-channel idle reset",
+        "description": "Minutes of inactivity before the conversation in this channel resets, overriding the general idle setting. This only controls when Discord Assist drops the conversation; Home Assistant itself expires chat sessions for core agents after 5 idle minutes.",
+        "data": {
+          "channel_id": "Discord channel",
+          "idle_minutes": "Idle minutes for this channel"
+        }
+      },
+      "remove_channel_idle": {
+        "title": "Remove per-channel idle reset",
+        "data": {
+          "channel_id": "Discord channel ID"
+        }
+      },
       "add_agent_user": {
         "title": "Agent for a user",
         "description": "This Discord user always talks to the chosen agent, in any channel. A user agent wins over a channel agent and the default agent.",
@@ -156,6 +173,7 @@
     },
     "abort": {
       "no_rooms": "No channels are mapped to rooms.",
+      "no_channel_idle": "No channels have a per-channel idle reset.",
       "no_user_agents": "No Discord users have their own agent.",
       "no_channel_agents": "No channels have their own agent."
     }

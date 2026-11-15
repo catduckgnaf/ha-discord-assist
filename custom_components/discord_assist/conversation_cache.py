@@ -28,14 +28,19 @@ class ConversationCache:
     def __len__(self) -> int:
         return len(self._store)
 
-    def get(self, key: str) -> str | None:
+    def get(self, key: str, ttl: timedelta | None = None) -> str | None:
+        """Cached conversation id for ``key``, or None once it idled out.
+
+        ``ttl`` overrides the default idle time for this lookup (the
+        per-channel idle setting).
+        """
         # Eviction is lazy (only on access) by design: inactive keys persist until
         # next access, which is acceptable at home scale.
         item = self._store.get(key)
         if item is None:
             return None
         conversation_id, last_used = item
-        if self._now() - last_used > self._ttl:
+        if self._now() - last_used > (self._ttl if ttl is None else ttl):
             del self._store[key]
             return None
         return conversation_id
@@ -45,6 +50,10 @@ class ConversationCache:
             self._store.pop(key, None)
             return
         self._store[key] = (conversation_id, self._now())
+
+    def reset(self, key: str) -> None:
+        """Drop the cached conversation id for ``key`` (the `reset` command)."""
+        self._store.pop(key, None)
 
 
 @dataclass(frozen=True)

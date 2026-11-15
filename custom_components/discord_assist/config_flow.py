@@ -41,6 +41,7 @@ from .const import (
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
     CONF_BOT_ID,
+    CONF_CHANNEL_IDLE_MINUTES,
     CONF_CHANNELS,
     CONF_CONVERSATION_SCOPE,
     CONF_EVENT_EXCLUDE_TEXT,
@@ -358,6 +359,8 @@ class DiscordAssistOptionsFlow(OptionsFlowWithReload):
                 "remove_user_map",
                 "add_room",
                 "remove_room",
+                "add_channel_idle",
+                "remove_channel_idle",
                 "add_agent_user",
                 "remove_agent_user",
                 "add_agent_channel",
@@ -484,6 +487,69 @@ class DiscordAssistOptionsFlow(OptionsFlowWithReload):
             return self.async_abort(reason="no_rooms")
         schema = vol.Schema({vol.Required("channel_id"): vol.In(sorted(room_map))})
         return self.async_show_form(step_id="remove_room", data_schema=schema)
+
+    async def async_step_add_channel_idle(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Override the idle reset for one channel (see CONF_CHANNEL_IDLE_MINUTES).
+
+        The override only controls when Discord Assist drops the cached
+        conversation id for that channel; it cannot extend Home Assistant's
+        own 5 minute chat session limit for core agents.
+        """
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            channel_id = str(user_input["channel_id"]).strip()
+            try:
+                minutes = int(user_input["idle_minutes"])
+            except TypeError, ValueError:
+                minutes = 0
+            if not channel_id.isdigit():
+                errors["base"] = "invalid_channel_id"
+            elif not 1 <= minutes <= 240:
+                errors["base"] = "invalid_idle_minutes"
+            else:
+                merged = dict(self.config_entry.options)
+                idle_map = dict(merged.get(CONF_CHANNEL_IDLE_MINUTES, {}))
+                idle_map[channel_id] = minutes
+                merged[CONF_CHANNEL_IDLE_MINUTES] = idle_map
+                return self.async_create_entry(title="", data=merged)
+
+        schema = vol.Schema(
+            {
+                vol.Required("channel_id"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=await self._channel_options(),
+                        custom_value=True,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required("idle_minutes", default=DEFAULT_IDLE_MINUTES): (
+                    NumberSelector(
+                        NumberSelectorConfig(
+                            min=1, max=240, step=1, mode=NumberSelectorMode.BOX
+                        )
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="add_channel_idle", data_schema=schema, errors=errors
+        )
+
+    async def async_step_remove_channel_idle(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        idle_map = dict(self.config_entry.options.get(CONF_CHANNEL_IDLE_MINUTES, {}))
+        if user_input is not None:
+            idle_map.pop(str(user_input["channel_id"]), None)
+            merged = dict(self.config_entry.options)
+            merged[CONF_CHANNEL_IDLE_MINUTES] = idle_map
+            return self.async_create_entry(title="", data=merged)
+        if not idle_map:
+            return self.async_abort(reason="no_channel_idle")
+        schema = vol.Schema({vol.Required("channel_id"): vol.In(sorted(idle_map))})
+        return self.async_show_form(step_id="remove_channel_idle", data_schema=schema)
 
     async def async_step_add_agent_user(
         self, user_input: dict[str, Any] | None = None
