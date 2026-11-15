@@ -26,7 +26,8 @@
           "conversation_scope": "Conversation history in channels (shared per channel, or separate per user)",
           "rate_limit_per_minute": "Max requests per Discord user per minute (0 = no limit)",
           "rate_limit_burst": "Requests a Discord user may send in a burst before the limit applies",
-          "placeholder_delay": "Show a working placeholder after this many seconds"
+          "placeholder_delay": "Show a working placeholder after this many seconds",
+          "timer_mention": "Mention the Discord user who set a timer when it finishes"
         }
       },
       "reauth_confirm": {
@@ -99,7 +100,8 @@
           "conversation_scope": "Conversation history in channels (shared per channel, or separate per user)",
           "rate_limit_per_minute": "Max requests per Discord user per minute (0 = no limit)",
           "rate_limit_burst": "Requests a Discord user may send in a burst before the limit applies",
-          "placeholder_delay": "Show a working placeholder after this many seconds"
+          "placeholder_delay": "Show a working placeholder after this many seconds",
+          "timer_mention": "Mention the Discord user who set a timer when it finishes"
         }
       },
       "add_user_map": {

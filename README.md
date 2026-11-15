@@ -118,6 +118,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for what is planned to make this easier.
 | Speaker context | Yes | Sends the agent the speaker's Discord name and Home Assistant user, the channel, the room (for room channels), and the local time, as extra system prompt text. Agents that ignore extra prompt text are unaffected |
 | Exclude message text from events | No | Omits the `text` field from the `discord_assist_message` event (see below). Event data is stored by the recorder, so turn this on if you do not want message text in your history |
 | Built-in commands first | No | Tries `conversation.home_assistant` first and only asks your agent when the built-in agent does not understand the request or finds no matching device. A command it matched but failed is not retried, so nothing runs twice |
+| Timer mention | No | Mentions the Discord user who set a timer when that timer finishes. Off by default: finished timers are announced in the channel without mentioning anyone |
 | Agent timeout | 60 s | Gives up and says so instead of typing forever |
 | Conversation scope | Channel | `Channel` shares one conversation history among everyone talking in a channel; `User` gives each person their own history in each channel. Direct messages always have a per-user history |
 
@@ -197,6 +198,12 @@ How they reach the agent, and the limits of that:
 In a channel the bot listens to (or a DM, if enabled), type `snapshot driveway` or `show me the driveway`, using the camera's entity ID or friendly name. The bot attaches a current snapshot as `snapshot.jpg`; very large images are requested downscaled by width.
 
 This is a deterministic command, not an agent feature, and it is gated twice: the camera must be exposed to Assist (the conversation assistant), and the Home Assistant user you are mapped to must have read permission on that camera. Non-exposed and unreadable cameras are refused, and their existence is not revealed. The conversation agent can never cause an attachment: replies from the agent are always sent as plain text, whatever file paths, URLs, or markers the reply contains. Only a snapshot the bot itself fetched for an allowed camera in that turn is ever attached.
+
+## Timers
+
+"Set a 5 minute timer" works in any channel the bot answers in. Home Assistant's timer intents need a device with a registered timer handler, so each Discord Assist entry has its own device in the device registry, and channels that are not mapped to a room send their requests as that device. When a timer finishes, the bot posts in the channel where it was set (for example "Kitchen timer done"). With the **Timer mention** option on, that post also mentions the Discord user who set the timer; it is the only mention the bot makes, and it is off by default.
+
+Room channels are the exception: they keep sending their room device, so room preference still applies there. A timer set in a room channel is handled by that device's own timer handler if it has one (a voice satellite, for example); the integration device is not assigned to a room area, because an unmapped channel has no knowable room.
 
 ## Room channels
 

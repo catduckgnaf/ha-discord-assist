@@ -57,6 +57,7 @@ from .const import (
     CONF_RESPOND_MENTIONS,
     CONF_ROOM_MAP,
     CONF_SPEAKER_CONTEXT,
+    CONF_TIMER_MENTION,
     CONF_TOKEN,
     CONF_USER_MAP,
     CONVERSATION_SCOPE_CHANNEL,
@@ -72,6 +73,7 @@ from .const import (
     DEFAULT_RESPOND_DMS,
     DEFAULT_RESPOND_MENTIONS,
     DEFAULT_SPEAKER_CONTEXT,
+    DEFAULT_TIMER_MENTION,
     DOMAIN,
     LEGACY_DOMAIN,
 )
@@ -130,6 +132,9 @@ def build_config_schema(channel_options: list[SelectOptionDict]) -> vol.Schema:
             ): BooleanSelector(),
             vol.Optional(
                 CONF_PREFER_LOCAL, default=DEFAULT_PREFER_LOCAL
+            ): BooleanSelector(),
+            vol.Optional(
+                CONF_TIMER_MENTION, default=DEFAULT_TIMER_MENTION
             ): BooleanSelector(),
             vol.Optional(
                 CONF_AGENT_TIMEOUT, default=DEFAULT_AGENT_TIMEOUT

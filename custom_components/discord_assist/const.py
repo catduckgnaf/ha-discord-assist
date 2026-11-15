@@ -25,6 +25,7 @@ CONF_PREFER_LOCAL = "prefer_local"
 CONF_AGENT_TIMEOUT = "agent_timeout"
 CONF_PLACEHOLDER_DELAY = "placeholder_delay"
 CONF_ROOM_MAP = "room_map"
+CONF_TIMER_MENTION = "timer_mention"
 CONF_CHANNEL_IDLE_MINUTES = "channel_idle_minutes"
 CONF_CONVERSATION_SCOPE = "conversation_scope"
 
@@ -48,6 +49,7 @@ DEFAULT_PREFER_LOCAL = False
 # Event fired on the HA bus once per accepted Discord message.
 EVENT_MESSAGE = f"{DOMAIN}_message"
 DEFAULT_AGENT_TIMEOUT = 60
+DEFAULT_TIMER_MENTION = False
 DEFAULT_CONVERSATION_SCOPE = CONVERSATION_SCOPE_CHANNEL
 DEFAULT_RATE_LIMIT_PER_MINUTE = 10
 DEFAULT_RATE_LIMIT_BURST = 3

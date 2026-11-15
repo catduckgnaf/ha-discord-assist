@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import timedelta
 
@@ -36,6 +37,7 @@ from .const import (
     CONF_RESPOND_MENTIONS,
     CONF_ROOM_MAP,
     CONF_SPEAKER_CONTEXT,
+    CONF_TIMER_MENTION,
     CONF_USER_MAP,
     CONVERSATION_SCOPE_USER,
     CONVERSATION_SCOPES,
@@ -49,6 +51,7 @@ from .const import (
     DEFAULT_RESPOND_DMS,
     DEFAULT_RESPOND_MENTIONS,
     DEFAULT_SPEAKER_CONTEXT,
+    DEFAULT_TIMER_MENTION,
     LOCAL_AGENT_ID,
 )
 from .conversation_cache import (
@@ -59,6 +62,7 @@ from .conversation_cache import (
 )
 from .notes import NotesStore
 from .snapshot import SnapshotResult, fetch_snapshot
+from .timers import TimerOrigin, TimerTracker
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -234,6 +238,13 @@ class ConversationRouter:
     rate_limit_burst: int = DEFAULT_RATE_LIMIT_BURST
     rate_limiter: RateLimiter | None = None
     turns: TurnLocks = field(default_factory=TurnLocks)
+    # The integration's own per-entry device. Channels that are not mapped
+    # to a room pass this device so Assist timer intents work there (it has
+    # the registered timer handler); room-mapped channels keep their room
+    # device, so room preference still applies in those channels.
+    integration_device_id: str | None = None
+    timer_mention: bool = DEFAULT_TIMER_MENTION
+    timer_tracker: TimerTracker | None = None
     notes_store: NotesStore | None = None
     config_entry_id: str | None = None
     event_exclude_text: bool = DEFAULT_EVENT_EXCLUDE_TEXT
@@ -285,12 +296,17 @@ class ConversationRouter:
         return None
 
     def device_for(self, channel_id: int | None, parent_id: int | None) -> str | None:
-        """Device standing in for the room a channel (or its thread) represents."""
+        """Device a channel's requests are sent as.
+
+        A room-mapped channel (or a thread in one) uses its room device.
+        Anything else falls back to the integration's own device, which is
+        what makes Assist timers work in unmapped channels and DMs.
+        """
         if channel_id in self.room_map:
             return self.room_map[channel_id]
-        if parent_id is not None:
-            return self.room_map.get(parent_id)
-        return None
+        if parent_id is not None and parent_id in self.room_map:
+            return self.room_map[parent_id]
+        return self.integration_device_id
 
     def agent_for(
         self,
@@ -392,7 +408,25 @@ class ConversationRouter:
         device_id = self.device_for(where.channel_id, where.parent_id)
         agent_id = self.agent_for(discord_user_id, where.channel_id, where.parent_id)
 
-        async with self.turns.hold(conversation_key):
+        # While this request is in flight, a timer started on the
+        # integration device belongs to this channel and user; the timer
+        # handler correlates it through the tracker (see timers.py).
+        tracking = nullcontext()
+        if (
+            self.timer_tracker is not None
+            and device_id is not None
+            and device_id == self.integration_device_id
+            and where.channel_id is not None
+        ):
+            tracking = self.timer_tracker.track_request(
+                TimerOrigin(
+                    channel_id=where.channel_id, discord_user_id=discord_user_id
+                )
+            )
+
+        # The origin is set only once this turn holds its lock, so a queued
+        # message cannot claim the running turn's timer.
+        async with self.turns.hold(conversation_key), tracking:
             try:
                 async with asyncio.timeout(self.agent_timeout):
                     return await self._converse(
@@ -576,6 +610,7 @@ class ConversationRouter:
             speaker_context=opts.get(CONF_SPEAKER_CONTEXT, DEFAULT_SPEAKER_CONTEXT),
             prefer_local=opts.get(CONF_PREFER_LOCAL, DEFAULT_PREFER_LOCAL),
             agent_timeout=float(opts.get(CONF_AGENT_TIMEOUT, DEFAULT_AGENT_TIMEOUT)),
+            timer_mention=opts.get(CONF_TIMER_MENTION, DEFAULT_TIMER_MENTION),
             conversation_scope=scope,
             config_entry_id=getattr(entry, "entry_id", None),
             event_exclude_text=bool(
