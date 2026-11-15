@@ -1,0 +1,42 @@
+send_message:
+  name: Send message
+  description: Send a message to a Discord channel or user through a loaded Discord Assist entry. Optionally returns the sent message ID as response data.
+  fields:
+    config_entry_id:
+      name: Config entry
+      description: The Discord Assist config entry whose bot sends the message.
+      required: true
+      selector:
+        config_entry:
+          integration: discord_assist
+    target:
+      name: Target
+      description: Discord channel ID to post to, or Discord user ID to open a direct message with.
+      required: true
+      example: "123456789012345678"
+      selector:
+        text:
+    message:
+      name: Message
+      description: Message text to send. Long messages are split into chunks automatically.
+      required: true
+      selector:
+        text:
+          multiline: true
+    image:
+      name: Image
+      description: Optional camera entity ID (for example camera.front_door) or a path to an image file in an allowed directory.
+      required: false
+      example: "camera.front_door"
+      selector:
+        text:
+    buttons:
+      name: Buttons
+      description: Optional list of buttons, each with an id, a label, and an optional style (primary, secondary, success, or danger).
+      required: false
+      example:
+        - id: "approve"
+          label: "Approve"
+          style: "primary"
+      selector:
+        object:

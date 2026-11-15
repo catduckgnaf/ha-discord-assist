@@ -116,6 +116,34 @@
       "no_rooms": "No channels are mapped to rooms."
     }
   },
+  "services": {
+    "send_message": {
+      "name": "Send message",
+      "description": "Send a message to a Discord channel or user through a loaded Discord Assist entry. Optionally returns the sent message ID as response data.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry",
+          "description": "The Discord Assist config entry whose bot sends the message."
+        },
+        "target": {
+          "name": "Target",
+          "description": "Discord channel ID to post to, or Discord user ID to open a direct message with."
+        },
+        "message": {
+          "name": "Message",
+          "description": "Message text to send. Long messages are split into chunks automatically."
+        },
+        "image": {
+          "name": "Image",
+          "description": "Camera entity ID or a path to an image file in an allowed directory."
+        },
+        "buttons": {
+          "name": "Buttons",
+          "description": "List of buttons, each with an id, a label, and an optional style (primary, secondary, success, or danger)."
+        }
+      }
+    }
+  },
   "entity": {
     "binary_sensor": {
       "gateway": {

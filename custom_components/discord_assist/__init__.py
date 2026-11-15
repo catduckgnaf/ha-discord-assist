@@ -25,6 +25,7 @@ from .const import (
     signal_connection,
 )
 from .conversation_router import ConversationRouter
+from .services import async_register_services, async_unregister_services
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -112,6 +113,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> b
         hass, _run(), name=f"{DOMAIN}-gateway-{entry.entry_id}"
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    async_register_services(hass)
     return True
 
 
@@ -119,6 +121,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: DiscordConfigEntry) -> 
     """Unload a config entry."""
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     await entry.runtime_data.client.close()
+    if unloaded:
+        others_loaded = [
+            other
+            for other in hass.config_entries.async_loaded_entries(DOMAIN)
+            if other.entry_id != entry.entry_id
+        ]
+        if not others_loaded:
+            async_unregister_services(hass)
     return unloaded
 
 
