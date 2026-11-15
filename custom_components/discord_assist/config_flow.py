@@ -38,8 +38,10 @@ from .const import (
     CONF_AGENT_ID,
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
+    CONF_APPROVERS,
     CONF_BOT_ID,
     CONF_CHANNELS,
+    CONF_CONFIRM_DOMAINS,
     CONF_FALLBACK_USER,
     CONF_IDLE_MINUTES,
     CONF_LANGUAGE,
@@ -99,6 +101,12 @@ def build_config_schema(channel_options: list[SelectOptionDict]) -> vol.Schema:
             ),
             vol.Optional(CONF_LANGUAGE, default=""): TextSelector(),
             vol.Optional(CONF_ALLOWLIST, default=[]): SelectSelector(
+                SelectSelectorConfig(options=[], multiple=True, custom_value=True)
+            ),
+            vol.Optional(CONF_CONFIRM_DOMAINS, default=[]): SelectSelector(
+                SelectSelectorConfig(options=[], multiple=True, custom_value=True)
+            ),
+            vol.Optional(CONF_APPROVERS, default=[]): SelectSelector(
                 SelectSelectorConfig(options=[], multiple=True, custom_value=True)
             ),
             vol.Optional(

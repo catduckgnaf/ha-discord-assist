@@ -23,6 +23,8 @@ CONF_SPEAKER_CONTEXT = "speaker_context"
 CONF_PREFER_LOCAL = "prefer_local"
 CONF_AGENT_TIMEOUT = "agent_timeout"
 CONF_ROOM_MAP = "room_map"
+CONF_CONFIRM_DOMAINS = "confirm_domains"
+CONF_APPROVERS = "approvers"
 
 DEFAULT_RESPOND_DMS = True
 DEFAULT_RESPOND_MENTIONS = True
@@ -36,6 +38,11 @@ LOCAL_AGENT_ID = "conversation.home_assistant"
 
 # Seconds to wait before reloading the entry after the gateway task dies.
 RECONNECT_DELAY = 60
+
+# Approval buttons for sensitive actions (permissions phase C).
+EVENT_APPROVAL = "discord_assist_approval"
+SERVICE_REQUEST_APPROVAL = "request_approval"
+DEFAULT_APPROVAL_TTL_MINUTES = 5
 
 ISSUE_NO_AUTHORIZED_USERS = "no_authorized_users"
 ISSUE_MESSAGE_CONTENT_INTENT = "message_content_intent"

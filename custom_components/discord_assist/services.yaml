@@ -1,0 +1,80 @@
+request_approval:
+  name: Request approval
+  description: >-
+    Post Approve and Deny buttons in a Discord channel for a service call.
+    The call runs, as the requesting Discord user's Home Assistant user,
+    only if the requester or an approver presses Approve before the
+    request expires.
+  fields:
+    config_entry_id:
+      name: Config entry ID
+      description: The Discord Assist config entry whose bot posts the buttons.
+      required: true
+      selector:
+        text:
+    channel_id:
+      name: Channel ID
+      description: The Discord channel to post the approval request in.
+      required: true
+      selector:
+        text:
+    requester_discord_id:
+      name: Requester Discord user ID
+      description: >-
+        The Discord user the action is for. On approval the service call
+        runs as this user's mapped Home Assistant user.
+      required: true
+      selector:
+        text:
+    domain:
+      name: Domain
+      description: The service domain to call on approval, for example lock.
+      required: true
+      example: "lock"
+      selector:
+        text:
+    service:
+      name: Service
+      description: The service to call on approval, for example unlock.
+      required: true
+      example: "unlock"
+      selector:
+        text:
+    service_data:
+      name: Service data
+      description: The service call data, for example an entity_id.
+      required: false
+      selector:
+        object:
+    description:
+      name: Description
+      description: What the buttons ask about, shown in the Discord message.
+      required: false
+      example: "Unlock the front door?"
+      selector:
+        text:
+    approvers:
+      name: Approvers
+      description: >-
+        Extra Discord user IDs who may approve or deny this request, on
+        top of the configured approvers.
+      required: false
+    self_approve:
+      name: Requester can approve
+      description: >-
+        Whether the requester may approve their own request. By default
+        the requester cannot self-approve locks and alarm panels; an
+        approver has to confirm those.
+      required: false
+      selector:
+        boolean:
+    ttl_minutes:
+      name: Expires after (minutes)
+      description: How long the buttons stay live before the request expires unexecuted.
+      required: false
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 120
+          mode: box
