@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
+from typing import Any
 
 import discord
 from homeassistant.core import HomeAssistant
@@ -21,6 +24,87 @@ _LOGGER = logging.getLogger(__name__)
 ERROR_REPLY = "Sorry, I hit an error talking to Home Assistant."
 EMPTY_REPLY = "(no response)"
 TIMEOUT_REPLY = "Sorry, Home Assistant took too long to answer. Try again?"
+UNAUTHORIZED_REPLY = "Sorry, you are not authorized to use this bot."
+
+# Option names a text-bearing application command may use for its prompt.
+_TEXT_OPTION_NAMES = ("text", "prompt", "query", "input", "message")
+
+
+@asynccontextmanager
+async def acknowledged(
+    interaction: discord.Interaction,
+    *,
+    thinking: bool = False,
+    ephemeral: bool = False,
+) -> AsyncIterator[discord.Interaction]:
+    """Acknowledge an interaction first, then let the handler work.
+
+    Discord invalidates an interaction token if no initial response is
+    sent within 3 seconds, while an Assist call routinely takes longer.
+    Entering this context defers the interaction immediately, before any
+    Home Assistant or agent work happens, so the token stays valid for
+    its 15 minute lifetime and the handler can take as long as the agent
+    timeout allows.
+
+    Usage for future handlers (button dispatcher, slash commands)::
+
+        async with acknowledged(interaction, thinking=True) as interaction:
+            reply = await run_assist(...)
+            await interaction.edit_original_response(content=reply)
+
+    ``thinking=True`` asks Discord to show a thinking indicator and is
+    the right choice for application commands; plain ``thinking=False``
+    is a deferred message update for components, where the original
+    message (including its buttons) stays in place until it is edited.
+    ``ephemeral`` only takes effect for application commands, or when
+    ``thinking`` is true.
+
+    If the interaction was already responded to, ``defer()`` is skipped:
+    ``InteractionResponse.is_done()`` guards against a second response
+    raising ``InteractionResponded``.
+    """
+    if not interaction.response.is_done():
+        await interaction.response.defer(thinking=thinking, ephemeral=ephemeral)
+    yield interaction
+
+
+def _option_value(options: Any) -> str | None:
+    """First text prompt in application-command options, if any.
+
+    Looks for a string option named like a prompt first, then falls back
+    to the first string-valued option. Subcommand options nest one level,
+    so recurse into option lists carried on an option itself.
+    """
+    if not isinstance(options, (list, tuple)):
+        return None
+    fallback: str | None = None
+    for option in options:
+        if not isinstance(option, Mapping):
+            continue
+        nested = _option_value(option.get("options"))
+        if nested is not None:
+            return nested
+        value = option.get("value")
+        if not isinstance(value, str) or not value.strip():
+            continue
+        if option.get("name") in _TEXT_OPTION_NAMES:
+            return value.strip()
+        if fallback is None:
+            fallback = value.strip()
+    return fallback
+
+
+def interaction_text(interaction: discord.Interaction) -> str | None:
+    """Text prompt carried by an interaction, or None if it has none.
+
+    Application commands carry their arguments in ``interaction.data``;
+    component and modal interactions carry no free text here, so they
+    return None and are left for their own dispatchers.
+    """
+    data = getattr(interaction, "data", None)
+    if not isinstance(data, Mapping):
+        return None
+    return _option_value(data.get("options"))
 
 
 class DiscordAssistClient(discord.Client):
@@ -54,6 +138,109 @@ class DiscordAssistClient(discord.Client):
 
     async def on_disconnect(self) -> None:
         self._set_connected(False)
+
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """Acknowledge every interaction first, then handle it.
+
+        This is the single interaction entry point on the client today.
+        Application commands defer with ``thinking=True``; components
+        defer as a message update so the button message stays in place.
+        Timeout and error outcomes edit the deferred response instead of
+        leaving Discord showing a perpetual thinking indicator.
+        """
+        thinking = (
+            getattr(interaction, "type", None)
+            == discord.InteractionType.application_command
+        )
+        async with acknowledged(interaction, thinking=thinking):
+            try:
+                await self.handle_interaction(interaction)
+            except AgentTimeout:
+                await self._edit_interaction_reply(interaction, TIMEOUT_REPLY)
+            except Exception:  # noqa: BLE001 - never let the gateway die
+                _LOGGER.exception("Interaction handling failed")
+                await self._edit_interaction_reply(interaction, ERROR_REPLY)
+
+    async def handle_interaction(self, interaction: discord.Interaction) -> None:
+        """Handle an already-acknowledged interaction.
+
+        Minimal real handler: a text-bearing application command is
+        answered through the conversation router, exactly like a message,
+        and the answer edits the original (deferred) response. Any other
+        interaction is only acknowledged for now; the button dispatcher
+        and the slash command tree replace or extend this dispatch when
+        they land, reusing :func:`acknowledged` the same way.
+        """
+        text = interaction_text(interaction)
+        if text is None:
+            _LOGGER.debug(
+                "Acknowledged interaction %s with no text prompt; "
+                "leaving it to a future dispatcher",
+                getattr(interaction, "id", None),
+            )
+            return
+
+        user = getattr(interaction, "user", None)
+        channel = getattr(interaction, "channel", None)
+        if user is None or channel is None:
+            return
+        channel_id = getattr(channel, "id", getattr(interaction, "channel_id", None))
+        if channel_id is None:
+            return
+
+        is_dm = isinstance(channel, discord.DMChannel) or (
+            getattr(interaction, "guild_id", None) is None
+        )
+        parent_id = channel.parent_id if isinstance(channel, discord.Thread) else None
+        # An explicit invocation is at least as intentional as a mention.
+        if not self.router.should_respond(
+            is_dm=is_dm,
+            was_mentioned=True,
+            channel_id=channel_id,
+            author_id=user.id,
+            parent_id=parent_id,
+        ):
+            await self._edit_interaction_reply(interaction, UNAUTHORIZED_REPLY)
+            return
+
+        key = make_conversation_key(
+            is_dm=is_dm, channel_id=channel_id, author_id=user.id
+        )
+        where = MessageContext(
+            display_name=getattr(user, "display_name", None),
+            channel_name=None if is_dm else getattr(channel, "name", None),
+            channel_id=channel_id,
+            parent_id=parent_id,
+        )
+        reply = await self.router.process(
+            text=text,
+            discord_user_id=user.id,
+            conversation_key=key,
+            where=where,
+        )
+        await self._edit_interaction_reply(interaction, reply or EMPTY_REPLY)
+
+    async def _edit_interaction_reply(
+        self, interaction: discord.Interaction, reply: str
+    ) -> None:
+        """Edit the deferred response with the answer, following up if long.
+
+        The first chunk edits the original response; any remaining chunks
+        go through the followup webhook. Agent output is untrusted, so
+        every send pins ``AllowedMentions.none()``.
+        """
+        no_mentions = discord.AllowedMentions.none()
+        for index, part in enumerate(chunk_message(reply)):
+            try:
+                if index == 0:
+                    await interaction.edit_original_response(
+                        content=part, allowed_mentions=no_mentions
+                    )
+                else:
+                    await interaction.followup.send(part, allowed_mentions=no_mentions)
+            except discord.HTTPException:
+                _LOGGER.warning("Failed to edit interaction response")
+                break
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author == self.user or message.author.bot:
