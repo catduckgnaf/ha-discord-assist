@@ -19,6 +19,7 @@ from .conversation_router import (
     MessageContext,
     make_conversation_key,
 )
+from .recent_errors import RecentErrors
 from .text_utils import chunk_message, strip_self_mention
 
 _LOGGER = logging.getLogger(__name__)
@@ -148,7 +149,9 @@ class DiscordAssistClient(discord.Client):
         hass: HomeAssistant,
         router: ConversationRouter,
         status_signal: str,
+        *,
         placeholder_delay: float = DEFAULT_PLACEHOLDER_DELAY,
+        recent_errors: RecentErrors | None = None,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -159,6 +162,9 @@ class DiscordAssistClient(discord.Client):
         )
         self.hass = hass
         self.router = router
+        self.recent_errors = (
+            recent_errors if recent_errors is not None else RecentErrors()
+        )
         self.connected = False
         self._status_signal = status_signal
         self.placeholder_delay = float(placeholder_delay)
@@ -279,7 +285,8 @@ class DiscordAssistClient(discord.Client):
                     )
                 else:
                     await interaction.followup.send(part, allowed_mentions=no_mentions)
-            except discord.HTTPException:
+            except discord.HTTPException as err:
+                self.recent_errors.record(err, source="interaction_reply")
                 _LOGGER.warning("Failed to edit interaction response")
                 break
 
@@ -335,7 +342,8 @@ class DiscordAssistClient(discord.Client):
                     reference = None
                 else:
                     await message.channel.send(part)
-            except discord.HTTPException:
+            except discord.HTTPException as err:
+                self.recent_errors.record(err, source="send_reply")
                 _LOGGER.warning(
                     "Failed to send reply to channel %s", message.channel.id
                 )
@@ -352,7 +360,8 @@ class DiscordAssistClient(discord.Client):
                     PLACEHOLDER_REPLY, reference=reference, mention_author=False
                 )
             return await message.channel.send(PLACEHOLDER_REPLY)
-        except discord.HTTPException:
+        except discord.HTTPException as err:
+            self.recent_errors.record(err, source="placeholder")
             _LOGGER.warning(
                 "Failed to send placeholder to channel %s", message.channel.id
             )
@@ -379,7 +388,8 @@ class DiscordAssistClient(discord.Client):
                 content=chunks[0],
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-        except discord.HTTPException:
+        except discord.HTTPException as err:
+            self.recent_errors.record(err, source="placeholder")
             _LOGGER.warning(
                 "Failed to edit placeholder in channel %s", message.channel.id
             )
@@ -388,7 +398,8 @@ class DiscordAssistClient(discord.Client):
         for part in chunks[1:]:
             try:
                 await message.channel.send(part)
-            except discord.HTTPException:
+            except discord.HTTPException as err:
+                self.recent_errors.record(err, source="send_reply")
                 _LOGGER.warning(
                     "Failed to send reply to channel %s", message.channel.id
                 )
@@ -423,12 +434,14 @@ class DiscordAssistClient(discord.Client):
             if not done:
                 placeholder = await self._post_placeholder(message)
             reply = await task
-        except AgentTimeout:
+        except AgentTimeout as err:
+            self.recent_errors.record(err, source="on_message")
             return TIMEOUT_REPLY, placeholder
         except asyncio.CancelledError:
             task.cancel()
             raise
-        except Exception:  # noqa: BLE001 - never let the gateway die
+        except Exception as err:  # noqa: BLE001 - never let the gateway die
+            self.recent_errors.record(err, source="on_message")
             _LOGGER.exception("Conversation processing failed")
             return ERROR_REPLY, placeholder
         finally:
