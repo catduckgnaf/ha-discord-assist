@@ -8,6 +8,7 @@
   "codeowners": ["@catduckgnaf"],
   "config_flow": true,
   "dependencies": ["conversation"],
+  "after_dependencies": ["logbook"],
   "documentation": "https://github.com/catduckgnaf/ha-discord-assist",
   "integration_type": "service",
   "iot_class": "cloud_push",
