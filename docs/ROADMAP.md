@@ -53,8 +53,11 @@ Grouped by theme. Effort: S (hours), M (a day or two), L (a week).
    (`conversation.home_assistant`) first and only fall back to the LLM when no
    intent matches. "Turn off all the lights" becomes instant, free, and
    deterministic. Mirrors Print Handy's deterministic-first routing.
-4. **Longer memory (S).** Raise the idle reset default and add a per-channel
-   override. Add a `reset` command (and slash command) to start fresh.
+4. **Longer memory (S).** Done in part, with a limit: see the decision below.
+   The `reset` text command and a per-channel idle override shipped; the idle
+   default was not raised, because Home Assistant core expires chat sessions
+   after 5 idle minutes (below). The `/reset` slash command is part of the
+   slash commands work (#19).
 5. **Standing preferences (M).** "Remember: all the lights means all lights."
    Store per-user notes in the integration's store and inject them via
    `extra_system_prompt`. Editable in options and via a `/remember` command.
@@ -65,6 +68,33 @@ Grouped by theme. Effort: S (hours), M (a day or two), L (a week).
    family channel gets the LLM.
 8. **Reply as a reply (S).** Use `message.reply()` with
    `fail_if_not_exists=False` so answers thread visually.
+
+### Decision: longer memory means preferences, not transcripts (#15)
+
+Home Assistant core expires a chat session after 5 idle minutes
+(`CONVERSATION_TIMEOUT` in `helpers/chat_session.py`), and the chat log is
+deleted with the session. For every agent built on `ChatLog` (all core LLM
+agents, and Extended OpenAI Conversation), the history is therefore gone
+after 5 idle minutes no matter what conversation id Discord Assist caches.
+Raising Discord Assist's idle default above 5 minutes does nothing for those
+agents, so the default stays at 15 minutes and the limit is stated plainly in
+the README instead.
+
+Decision: Discord Assist will **not** keep its own transcript and re-supply
+it to the agent (for example via `extra_system_prompt`). Re-supplying would
+duplicate history the agent already manages, spend tokens on every turn, and
+risk stale or conflicting context. Longer memory instead comes from standing
+preferences (suggestion 5, #16): short, deliberate facts the user asked to
+keep, injected on every turn.
+
+What the idle settings do control is when Discord Assist drops the cached
+conversation id: the global idle minutes, plus a per-channel override in
+options for channels that should reset sooner or later. That matters for
+agents that keep their own history keyed by conversation id, and for keeping
+busy channels from resuming stale threads. Sending a message that is exactly
+`reset` (any case) drops the cached id for that channel or DM on demand and
+replies "Started a fresh conversation."; the `/reset` slash command is
+tracked with the slash commands work (#19).
 
 ### Discord features
 
@@ -203,41 +233,41 @@ User mapping beats role mapping; deny beats allow; no match means ignored
 
 | Phase | Ships | Depends on | Status |
 | --- | --- | --- | --- |
-| A | Profiles in options, user and role mapping, per-profile HA user, channel and DM rules, quiet hours, rate limit, per-profile agent, audit event | nothing | #12, draft PR #59 open |
-| B | Scoped tools per profile (areas, domains, entity allow and deny, read-only tools) | the bundled agent (#40) | #34 and #40 in progress, draft PRs pending |
-| C | Approval buttons for sensitive tools, approver list | B and the button dispatcher (suggestion 9) | #35 in progress, draft PR pending |
+| A | Profiles in options, user and role mapping, per-profile HA user, channel and DM rules, quiet hours, rate limit, per-profile agent, audit event | nothing | #12, PR #59 open, needs rework (see below) |
+| B | Scoped tools per profile (areas, domains, entity allow and deny, read-only tools) | the bundled agent (#40) | Scoped LLM API merged (#34 via #68); bundled agent gate #69 and ha-mcp bridge #70 open, need rework |
+| C | Approval buttons for sensitive tools, approver list | B and the button dispatcher | #35, PR #67 open, needs rework; dispatcher merged (#43) |
 
 ### Tracking (epic #39)
 
-Status as of 2026-11-15. Every phase was built as an independent draft pull
-request branched from `main`; each lane carried the smallest self-contained
-substrate it needed, so the phases can land in any order. Merging is
-catduck's alone. Where two lanes built overlapping substrate (button
-stores, profile scope), the convergence is a rebase at merge time, named in
-each pull request.
+Status as of 2026-11-15, after the merge pass over the open pull requests.
+The lanes were built as independent pull requests from `main`, each with its
+own copy of the substrate it needed. Everything outside the permission gate
+is merged; the gate itself is not, because review found fail-open paths that
+need one design across the phases rather than a fix at merge time. The
+findings are on each pull request.
 
-| Work item | Issue | Draft PR | Status |
+| Work item | Issue | PR | Status |
 | --- | --- | --- | --- |
-| Phase A: profiles, user and role mapping, gatekeeping, audit | #12 | #59 | Draft open |
-| Phase B: scoped LLM API | #34 | pending | In progress |
-| Phase C: approval buttons, approver list | #35 | pending | In progress |
-| Bundled agent with ha-mcp tools (implements phases B and C) | #40 | pending | In progress |
-| In-process ha-mcp LLM API for the bundled agent | #41 | pending | In progress |
+| Phase A: profiles, user and role mapping, gatekeeping, audit | #12 | #59 | Open: DM deny bypass, profile edit wipes restrictions, channel list acts as a listening list |
+| Phase B: scoped LLM API | #34 | #68 | Merged; scopes have no options UI until profiles land |
+| Phase C: approval buttons, approver list | #35 | #67 | Open: `request_approval` lets a non-admin run any service as the admin; own dispatcher, not yet on #43 |
+| Bundled agent with ha-mcp tools (phases B and C) | #40 | #69 | Open: tool gate bypassable (`ha_call_tool`, `ha_call_service` domain/service split, area targets, empty allowlist means all) |
+| In-process ha-mcp LLM API for the bundled agent | #41 | #70 | Open: argument check and non-admin tool filter bypassable |
 | Decision: which agent Luna runs behind | #36 | n/a | Decided, issue closed (bundled agent, #40) |
-| Decision: Server Members intent for role mapping | #37 | #65 | Draft open |
-| Decision: shared-channel history per profile | #38 | #64 | Draft open |
+| Decision: Server Members intent for role mapping | #37 | #65 | Open, lands with phase A (resolution failure must deny when deny roles exist) |
+| Decision: shared-channel history per profile | #38 | #64 | Merged |
 
-Supporting work the phases build on, also delivered as draft pull requests:
-the button dispatcher (#13, draft PR #43) and acknowledge first (#14, draft
-PR #48) under phases B and C; per-user rate limit (#28, draft PR #44) and
-agent per channel or user (#18, draft PR #55) under phase A gatekeeping;
-re-read state before acting (#30, draft PR #63) under phase C approvals.
+Merged supporting work: the persistent button dispatcher and shared send
+helper (#13, #43), acknowledge first (#14, #48 and #71), per-user rate limit
+(#28, #44), agent per channel or user (#18, #55), re-read state before
+acting (#30, #63), retire stale buttons (#27, #61).
 
-Remainder for this epic: the four "in progress" rows need their draft PR
-numbers filled in as those lanes deliver, and each phase's checkbox on #39
-is ticked only when its pull request merges. The live-server check that
-partial-member payloads carry roles (the open remainder on #37) is
-catduck's to run on a real server.
+Next for this epic: one router path (`resolve` the request's profile, HA
+user, agent, device and conversation key, then `gate` it) used by messages,
+text commands, slash commands and buttons; one argument parser and scope
+check shared by the scoped API, the bundled agent and the ha-mcp bridge;
+approvals rebuilt as button handlers on the shared store. Each phase's
+checkbox on #39 is ticked when its pull request merges.
 
 ### Decision: a bundled agent with ha-mcp tools (2026-11-15)
 
@@ -254,19 +284,50 @@ Assistant's Device control API as the speaker's own user. Design, transport
 choice (in-process ha-mcp LLM API or MCP client to the app) and open questions
 are in issue #40.
 
+### Decision: conversation keying in shared channels (2026-11-15)
+
+Conversations in a channel are keyed per channel by default
+(`channel:<id>`), so everyone talking in a channel shares one agent history,
+the same way everyone in a room shares a voice satellite's conversation.
+Direct messages are always keyed per user (`dm:<id>`). Profiles do not
+restrict this by default.
+
+The exposure is stated plainly: in the default channel scope, anything one
+speaker tells the agent is part of the shared history that other channel
+members can continue, so a guest in the family channel can ask "what did
+Andrew just ask you?" and the agent can answer from the earlier turns.
+Discord already shows the channel's messages and the bot's replies to every
+member; what is additionally shared is what lives only in the agent history,
+such as tool results and system prompt content (speaker context, standing
+preferences). The exposure is bounded: this integration's conversation cache
+expires after the configured idle minutes, and Home Assistant core chat
+sessions expire after 5 idle minutes.
+
+For channels where that is not acceptable, the `conversation_scope` option
+can be set to `user`: channel keys become `channel:<id>:user:<id>`, so each
+person gets their own history in the channel. The cost is the shared-room
+feel: "turn it off again" no longer works across people, because a follow-up
+only sees the speaker's own turns. Per-profile keys were considered and not
+chosen: a profile is an access rule, not a social grouping, and per-user
+keys already cover the isolation need.
+
+Switching the scope does not migrate existing conversations. The keys
+simply change, so conversations started under the old scope stop being
+continued and idle-expire on their own.
+
 ### Open questions
 
 - ~~Which agent should Luna run behind?~~ Decided: the bundled agent above (#36, #40).
 - (Original question) Tier 3 needs an agent that supports Home
   Assistant LLM APIs; Extended OpenAI Conversation does not.
-- ~~Discord roles need the Server Members intent to read member roles
-  reliably.~~ Decided (#37, draft PR #65): no privileged intent; roles come
+- Discord roles need the Server Members intent to read member roles
+  reliably. Proposed in #37 (open PR #65): no privileged intent; roles come
   from the message's member payload first, with a cached `fetch_member`
   fallback, and a repair issue if role mapping is configured but roles
-  cannot be resolved. The live-server check of partial-member payloads
-  stays open on #37.
+  cannot be resolved. Lands with phase A; the live-server check of
+  partial-member payloads stays open on #37.
 - ~~Should profiles also restrict which conversation history a user can see
-  in shared channels?~~ Decided (#38, draft PR #64): guild channels keep one
+  in shared channels?~~ Decided (#38, merged in #64): guild channels keep one
   shared conversation by default; a `conversation_scope` option switches
   channels to per-user history. DMs are always per user.
 
