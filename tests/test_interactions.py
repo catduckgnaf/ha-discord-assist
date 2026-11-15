@@ -191,19 +191,29 @@ async def test_error_path_edits_response_with_error_text(monkeypatch):
     assert interaction.edited_content == ERROR_REPLY
 
 
-async def test_component_interaction_defers_without_thinking(monkeypatch):
-    """Buttons defer as a message update; the button message stays."""
+@pytest.mark.parametrize(
+    "interaction_type",
+    [
+        discord.InteractionType.component,
+        discord.InteractionType.autocomplete,
+        discord.InteractionType.modal_submit,
+    ],
+)
+async def test_non_command_interactions_are_left_alone(monkeypatch, interaction_type):
+    """Components, modals and autocomplete never defer here or reach the agent.
+
+    Views answer their own components, and autocomplete fires on every
+    keystroke of half-typed text.
+    """
     events = []
     router = _router(events)
     client = _client(router, monkeypatch)
-    interaction = _interaction(
-        events, interaction_type=discord.InteractionType.component, text=None
-    )
-    interaction.data = {"custom_id": "assist:confirm:1", "component_type": 2}
+    interaction = _interaction(events, interaction_type=interaction_type)
 
     await client.on_interaction(interaction)
 
-    assert interaction.response.defer_calls == [{"thinking": False, "ephemeral": False}]
+    assert interaction.response.defer_calls == []
+    assert events == []
     router.process.assert_not_called()
     interaction.edit_original_response.assert_not_called()
 
