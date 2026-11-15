@@ -39,6 +39,7 @@ from .const import (
     LOCAL_AGENT_ID,
 )
 from .conversation_cache import ConversationCache, TurnLocks
+from .snapshot import SnapshotResult, fetch_snapshot
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -211,6 +212,24 @@ class ConversationRouter:
                     )
             except TimeoutError as err:
                 raise AgentTimeout from err
+
+    async def process_snapshot(
+        self, *, query: str, discord_user_id: int
+    ) -> SnapshotResult:
+        """Fetch a camera snapshot for an authorized Discord user.
+
+        Deterministic and agent-free: the conversation agent is never
+        called, and the only image that can come back is one fetched here
+        for an exposed camera the mapped HA user may read. Fails closed
+        exactly like process(): no HA user, no snapshot.
+        """
+        ha_user_id = self.ha_user_for(discord_user_id)
+        if ha_user_id is None:
+            raise PermissionError(f"Discord user {discord_user_id} is not authorized")
+        user = await self.hass.auth.async_get_user(ha_user_id)
+        if user is None:
+            raise PermissionError(f"Home Assistant user {ha_user_id} does not exist")
+        return await fetch_snapshot(self.hass, user, query)
 
     async def _converse(
         self,

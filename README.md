@@ -20,6 +20,7 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 - Optional local-first mode: Home Assistant's built-in commands answer instantly, the LLM handles the rest
 - One turn at a time per conversation, with a timeout instead of typing forever
 - Answers as Discord replies, and long code blocks split cleanly across messages
+- Camera snapshots: `snapshot <camera>` (or `show me <camera>`) attaches a current snapshot of an exposed camera you are allowed to view
 - Maps Discord user IDs to Home Assistant users so commands run as the right person
 - Fails closed: Discord users it cannot run as a Home Assistant user are ignored
 - Replies can never ping `@everyone`, roles, or users
@@ -110,6 +111,12 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for what is planned to make this easier.
 | Speaker context | Yes | Sends the agent the speaker's Discord name and Home Assistant user, the channel, the room (for room channels), and the local time, as extra system prompt text. Agents that ignore extra prompt text are unaffected |
 | Built-in commands first | No | Tries `conversation.home_assistant` first and only asks your agent when the built-in agent does not understand the request or finds no matching device. A command it matched but failed is not retried, so nothing runs twice |
 | Agent timeout | 60 s | Gives up and says so instead of typing forever |
+
+## Camera snapshots
+
+In a channel the bot listens to (or a DM, if enabled), type `snapshot driveway` or `show me the driveway`, using the camera's entity ID or friendly name. The bot attaches a current snapshot as `snapshot.jpg`; very large images are requested downscaled by width.
+
+This is a deterministic command, not an agent feature, and it is gated twice: the camera must be exposed to Assist (the conversation assistant), and the Home Assistant user you are mapped to must have read permission on that camera. Non-exposed and unreadable cameras are refused, and their existence is not revealed. The conversation agent can never cause an attachment: replies from the agent are always sent as plain text, whatever file paths, URLs, or markers the reply contains. Only a snapshot the bot itself fetched for an allowed camera in that turn is ever attached.
 
 ## Room channels
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import logging
 
 import discord
@@ -13,6 +14,11 @@ from .conversation_router import (
     ConversationRouter,
     MessageContext,
     make_conversation_key,
+)
+from .snapshot import (
+    SnapshotResult,
+    parse_show_me_command,
+    parse_snapshot_command,
 )
 from .text_utils import chunk_message, strip_self_mention
 
@@ -79,6 +85,27 @@ class DiscordAssistClient(discord.Client):
         if not text:
             return
 
+        # Deterministic snapshot command: handled here, never by the agent.
+        # This is the only path that can attach a file, and it attaches only
+        # image bytes the snapshot code fetched for an allowed camera in
+        # this turn. Agent replies go through _send_reply, which never
+        # attaches anything, whatever the reply text says.
+        snapshot_query = parse_snapshot_command(text)
+        if snapshot_query is not None:
+            await self._handle_snapshot(message, snapshot_query)
+            return
+        # "show me <name>" is a snapshot only when it unambiguously matches
+        # an allowed camera; otherwise the agent answers it as usual and
+        # (like every agent reply) attaches nothing.
+        show_me_query = parse_show_me_command(text)
+        if show_me_query is not None:
+            result = await self._fetch_snapshot_result(message, show_me_query)
+            if result is None:
+                return
+            if result.matched:
+                await self._send_snapshot_reply(message, result)
+                return
+
         key = make_conversation_key(
             is_dm=is_dm, channel_id=message.channel.id, author_id=message.author.id
         )
@@ -118,6 +145,76 @@ class DiscordAssistClient(discord.Client):
                     "Failed to send reply to channel %s", message.channel.id
                 )
                 break
+
+    async def _handle_snapshot(self, message: discord.Message, query: str) -> None:
+        """Answer a snapshot command, ignoring users without an HA identity."""
+        result = await self._fetch_snapshot_result(message, query)
+        if result is not None:
+            await self._send_snapshot_reply(message, result)
+
+    async def _fetch_snapshot_result(
+        self, message: discord.Message, query: str
+    ) -> SnapshotResult | None:
+        """Run the snapshot fetch with a typing indicator.
+
+        Returns None when the user has no HA identity: fail closed and
+        stay silent, exactly like an unauthorized agent request.
+        """
+
+        async def run() -> SnapshotResult:
+            return await self.router.process_snapshot(
+                query=query, discord_user_id=message.author.id
+            )
+
+        result: SnapshotResult | None = None
+        started = False
+        try:
+            try:
+                async with message.channel.typing():
+                    started = True
+                    result = await run()
+            except discord.HTTPException:
+                # Typing is best-effort; only retry when the fetch never ran.
+                if result is not None:
+                    pass
+                elif started:
+                    raise
+                else:
+                    result = await run()
+        except PermissionError:
+            # should_respond already gated this, but fail closed if the
+            # mapping changed between the check and here: stay silent.
+            return None
+        except Exception:  # noqa: BLE001 - never let the gateway die
+            _LOGGER.exception("Snapshot processing failed")
+            result = SnapshotResult(text=ERROR_REPLY, matched=True)
+        return result or SnapshotResult(text=ERROR_REPLY, matched=True)
+
+    async def _send_snapshot_reply(
+        self, message: discord.Message, result: SnapshotResult
+    ) -> None:
+        """Send a snapshot result; attach only bytes fetched this turn."""
+        reference = message.to_reference(fail_if_not_exists=False)
+        try:
+            if result.image_content is not None:
+                await message.channel.send(
+                    result.text,
+                    reference=reference,
+                    mention_author=False,
+                    file=discord.File(
+                        io.BytesIO(result.image_content), filename=result.filename
+                    ),
+                )
+            elif reference is not None:
+                await message.channel.send(
+                    result.text, reference=reference, mention_author=False
+                )
+            else:
+                await message.channel.send(result.text)
+        except discord.HTTPException:
+            _LOGGER.warning(
+                "Failed to send snapshot reply to channel %s", message.channel.id
+            )
 
     async def _answer(
         self, message: discord.Message, text: str, key: str, where: MessageContext
