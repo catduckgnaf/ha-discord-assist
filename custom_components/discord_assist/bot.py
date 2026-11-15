@@ -107,6 +107,7 @@ def interaction_text(interaction: discord.Interaction) -> str | None:
         return None
     return _option_value(data.get("options"))
 
+
 # Discord typing indicators expire after about 10 seconds, so there is no
 # point refreshing one for longer than that, however long the agent runs.
 TYPING_CAP_SECONDS = 10.0
@@ -170,19 +171,22 @@ class DiscordAssistClient(discord.Client):
         self._set_connected(False)
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
-        """Acknowledge every interaction first, then handle it.
+        """Acknowledge an application command first, then handle it.
 
-        This is the single interaction entry point on the client today.
-        Application commands defer with ``thinking=True``; components
-        defer as a message update so the button message stays in place.
-        Timeout and error outcomes edit the deferred response instead of
-        leaving Discord showing a perpetual thinking indicator.
+        Only application commands are handled here. Autocomplete cannot be
+        deferred and must never reach the agent (it fires on every
+        keystroke), and component and modal interactions belong to their
+        own dispatchers (discord.py views), which respond themselves; a
+        second defer from here would race them. Timeout and error outcomes
+        edit the deferred response instead of leaving Discord showing a
+        perpetual thinking indicator.
         """
-        thinking = (
+        if (
             getattr(interaction, "type", None)
-            == discord.InteractionType.application_command
-        )
-        async with acknowledged(interaction, thinking=thinking):
+            != discord.InteractionType.application_command
+        ):
+            return
+        async with acknowledged(interaction, thinking=True):
             try:
                 await self.handle_interaction(interaction)
             except AgentTimeout:
