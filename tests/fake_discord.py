@@ -324,6 +324,9 @@ class FakeMessage:
         self.replies: list[FakeMessage] = []
         self.to_reference_calls: list[dict[str, Any]] = []
         self.deleted = False
+        # Failure injection: an exception instance makes edit() raise it
+        # (after recording the attempt), as Discord would.
+        self.edit_error: Exception | None = None
         channel.messages.append(self)
 
     @property
@@ -367,6 +370,8 @@ class FakeMessage:
         call = Call("edit", (), kwargs)
         self.calls.append(call)
         self.edits.append(call)
+        if self.edit_error is not None:
+            raise self.edit_error
         if "content" in kwargs:
             self.content = kwargs["content"]
         if "view" in kwargs:

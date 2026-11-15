@@ -12,6 +12,7 @@ import discord
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
+from .const import DEFAULT_PLACEHOLDER_DELAY
 from .conversation_router import (
     AgentTimeout,
     ConversationRouter,
@@ -25,6 +26,7 @@ _LOGGER = logging.getLogger(__name__)
 ERROR_REPLY = "Sorry, I hit an error talking to Home Assistant."
 EMPTY_REPLY = "(no response)"
 TIMEOUT_REPLY = "Sorry, Home Assistant took too long to answer. Try again?"
+PLACEHOLDER_REPLY = "Working on it..."
 UNAUTHORIZED_REPLY = "Sorry, you are not authorized to use this bot."
 
 # Option names a text-bearing application command may use for its prompt.
@@ -142,7 +144,11 @@ class DiscordAssistClient(discord.Client):
     """Listens for messages and routes them to the HA conversation agent."""
 
     def __init__(
-        self, hass: HomeAssistant, router: ConversationRouter, status_signal: str
+        self,
+        hass: HomeAssistant,
+        router: ConversationRouter,
+        status_signal: str,
+        placeholder_delay: float = DEFAULT_PLACEHOLDER_DELAY,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -155,6 +161,7 @@ class DiscordAssistClient(discord.Client):
         self.router = router
         self.connected = False
         self._status_signal = status_signal
+        self.placeholder_delay = float(placeholder_delay)
 
     def _set_connected(self, connected: bool) -> None:
         if connected != self.connected:
@@ -309,14 +316,8 @@ class DiscordAssistClient(discord.Client):
             channel_id=message.channel.id,
             parent_id=parent_id,
         )
-        reply = ERROR_REPLY
-        try:
-            reply = await self._answer(message, text, key, where)
-        except AgentTimeout:
-            reply = TIMEOUT_REPLY
-        except Exception:  # noqa: BLE001 - never let the gateway die
-            _LOGGER.exception("Conversation processing failed")
-        await self._send_reply(message, reply or EMPTY_REPLY)
+        reply, placeholder = await self._answer(message, text, key, where)
+        await self._deliver_reply(message, reply or EMPTY_REPLY, placeholder)
 
     async def _send_reply(self, message: discord.Message, reply: str) -> None:
         """First piece replies to the message (no ping); the rest follow it.
@@ -340,23 +341,97 @@ class DiscordAssistClient(discord.Client):
                 )
                 break
 
+    async def _post_placeholder(
+        self, message: discord.Message
+    ) -> discord.Message | None:
+        """Post the slow-answer placeholder as a reply, best-effort."""
+        reference = message.to_reference(fail_if_not_exists=False)
+        try:
+            if reference is not None:
+                return await message.channel.send(
+                    PLACEHOLDER_REPLY, reference=reference, mention_author=False
+                )
+            return await message.channel.send(PLACEHOLDER_REPLY)
+        except discord.HTTPException:
+            _LOGGER.warning(
+                "Failed to send placeholder to channel %s", message.channel.id
+            )
+            return None
+
+    async def _deliver_reply(
+        self,
+        message: discord.Message,
+        reply: str,
+        placeholder: discord.Message | None,
+    ) -> None:
+        """Deliver a reply, editing the placeholder in place when one exists.
+
+        The first chunk replaces the placeholder text; any remaining chunks
+        are sent as follow-up messages. If the edit fails, fall back to
+        sending the whole reply as new messages.
+        """
+        if placeholder is None:
+            await self._send_reply(message, reply)
+            return
+        chunks = chunk_message(reply)
+        try:
+            await placeholder.edit(
+                content=chunks[0],
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException:
+            _LOGGER.warning(
+                "Failed to edit placeholder in channel %s", message.channel.id
+            )
+            await self._send_reply(message, reply)
+            return
+        for part in chunks[1:]:
+            try:
+                await message.channel.send(part)
+            except discord.HTTPException:
+                _LOGGER.warning(
+                    "Failed to send reply to channel %s", message.channel.id
+                )
+                break
+
     async def _answer(
         self, message: discord.Message, text: str, key: str, where: MessageContext
-    ) -> str:
-        """Process the message, showing a capped typing indicator.
+    ) -> tuple[str, discord.Message | None]:
+        """Process the message with a capped typing indicator and a placeholder.
 
         Typing runs in a background task bounded by TYPING_CAP_SECONDS and
         is cancelled as soon as the answer is ready; it can never raise
-        into the answer path or re-run the agent.
+        into the answer path or re-run the agent. The agent runs as its own
+        task: if it has not answered after ``placeholder_delay`` seconds, a
+        placeholder reply is posted and returned alongside the final text
+        so the caller can edit it in place. Fast answers never see one.
+        Timeout and error outcomes are mapped to their reply text here so
+        those paths can edit the placeholder too.
         """
         typing_task = asyncio.create_task(_bounded_typing(message.channel))
-        try:
-            return await self.router.process(
+        task = asyncio.create_task(
+            self.router.process(
                 text=text,
                 discord_user_id=message.author.id,
                 conversation_key=key,
                 where=where,
             )
+        )
+        placeholder: discord.Message | None = None
+        try:
+            done, _ = await asyncio.wait({task}, timeout=self.placeholder_delay)
+            if not done:
+                placeholder = await self._post_placeholder(message)
+            reply = await task
+        except AgentTimeout:
+            return TIMEOUT_REPLY, placeholder
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        except Exception:  # noqa: BLE001 - never let the gateway die
+            _LOGGER.exception("Conversation processing failed")
+            return ERROR_REPLY, placeholder
         finally:
             typing_task.cancel()
             await asyncio.gather(typing_task, return_exceptions=True)
+        return reply, placeholder

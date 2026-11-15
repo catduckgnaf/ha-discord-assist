@@ -5,8 +5,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 
 import custom_components.discord_assist.bot as bot_module
-from custom_components.discord_assist.bot import TIMEOUT_REPLY, DiscordAssistClient
+from custom_components.discord_assist.bot import (
+    ERROR_REPLY,
+    PLACEHOLDER_REPLY,
+    TIMEOUT_REPLY,
+    DiscordAssistClient,
+)
+from custom_components.discord_assist.const import DEFAULT_PLACEHOLDER_DELAY
 from custom_components.discord_assist.conversation_router import AgentTimeout
+from custom_components.discord_assist.text_utils import chunk_message
 from tests.fake_discord import (
     FakeDMChannel,
     FakeTextChannel,
@@ -42,10 +49,13 @@ def _first_send(msg):
     return msg.channel.send_calls[0]
 
 
-def _client(router, monkeypatch):
+def _client(router, monkeypatch, *, placeholder_delay=None):
+    kwargs = {}
+    if placeholder_delay is not None:
+        kwargs["placeholder_delay"] = placeholder_delay
     with patch("discord.Client.__init__", return_value=None):
         client = DiscordAssistClient(
-            hass=object(), router=router, status_signal="test_signal"
+            hass=object(), router=router, status_signal="test_signal", **kwargs
         )
     # discord.Client.user is normally read-only; stub it for tests
     monkeypatch.setattr(
@@ -262,3 +272,165 @@ async def test_dm_has_no_channel_name(monkeypatch):
     client = _client(router, monkeypatch)
     await client.on_message(_message("hello", is_dm=True))
     assert router.process.call_args.kwargs["where"].channel_name is None
+
+
+def _assert_no_mentions(call):
+    mentions = call.kwargs["allowed_mentions"]
+    assert mentions.everyone is False
+    assert mentions.roles is False
+    assert mentions.users is False
+    assert mentions.replied_user is False
+
+
+def _slow(result, delay=0.2):
+    async def process(**kwargs):
+        await asyncio.sleep(delay)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    return AsyncMock(side_effect=process)
+
+
+def _slow_client(router, monkeypatch):
+    router.should_respond.return_value = True
+    return _client(router, monkeypatch, placeholder_delay=0.05)
+
+
+def test_placeholder_delay_defaults_to_three_seconds(monkeypatch):
+    client = _client(MagicMock(), monkeypatch)
+    assert DEFAULT_PLACEHOLDER_DELAY == 3.0
+    assert client.placeholder_delay == 3.0
+
+
+async def test_fast_answer_never_shows_placeholder(monkeypatch):
+    router = MagicMock()
+    router.process = AsyncMock(return_value="Quick answer.")
+    client = _slow_client(router, monkeypatch)
+    msg = _message("<@999> quick", mentions=[FakeUser(id=999)])
+    await client.on_message(msg)
+    # Exactly one send: the answer itself, as a reply. No placeholder.
+    assert len(msg.channel.send_calls) == 1
+    call = assert_first_send_is_reply(msg.channel, to=msg)
+    assert call.content == "Quick answer."
+
+
+async def test_slow_answer_posts_one_placeholder_and_edits_it(monkeypatch):
+    router = MagicMock()
+    router.process = _slow("Slow answer.")
+    client = _slow_client(router, monkeypatch)
+    msg = _message("<@999> slow", mentions=[FakeUser(id=999)])
+    await client.on_message(msg)
+    router.process.assert_awaited_once()
+    # One send only: the placeholder, posted as a reply.
+    assert len(msg.channel.send_calls) == 1
+    call = assert_first_send_is_reply(msg.channel, to=msg)
+    assert call.content == PLACEHOLDER_REPLY
+    assert call.kwargs["mention_author"] is False
+    # The answer replaces the placeholder in place, with no mentions.
+    placeholder = call.message
+    assert len(placeholder.edits) == 1
+    assert placeholder.content == "Slow answer."
+    _assert_no_mentions(placeholder.edits[0])
+
+
+async def test_slow_long_answer_edits_first_chunk_and_sends_rest(monkeypatch):
+    router = MagicMock()
+    answer = "word\n" * 1000
+    router.process = _slow(answer)
+    client = _slow_client(router, monkeypatch)
+    msg = _message("<@999> essay", mentions=[FakeUser(id=999)])
+    await client.on_message(msg)
+    chunks = chunk_message(answer)
+    assert len(chunks) > 1
+    sends = msg.channel.send_calls
+    # First send is the placeholder; the rest are the remaining chunks.
+    assert sends[0].content == PLACEHOLDER_REPLY
+    assert [c.content for c in sends[1:]] == chunks[1:]
+    assert all(c.kwargs == {} for c in sends[1:])
+    placeholder = sends[0].message
+    assert len(placeholder.edits) == 1
+    assert placeholder.content == chunks[0]
+    _assert_no_mentions(placeholder.edits[0])
+
+
+async def test_slow_timeout_edits_placeholder(monkeypatch):
+    router = MagicMock()
+    router.process = _slow(AgentTimeout())
+    client = _slow_client(router, monkeypatch)
+    msg = _message("<@999> slow", mentions=[FakeUser(id=999)])
+    await client.on_message(msg)
+    assert len(msg.channel.send_calls) == 1
+    placeholder = assert_first_send_is_reply(msg.channel, to=msg).message
+    assert len(placeholder.edits) == 1
+    assert placeholder.content == TIMEOUT_REPLY
+    _assert_no_mentions(placeholder.edits[0])
+
+
+async def test_slow_error_edits_placeholder(monkeypatch):
+    router = MagicMock()
+    router.process = _slow(RuntimeError("boom"))
+    client = _slow_client(router, monkeypatch)
+    msg = _message("<@999> slow", mentions=[FakeUser(id=999)])
+    await client.on_message(msg)
+    placeholder = assert_first_send_is_reply(msg.channel, to=msg).message
+    assert len(placeholder.edits) == 1
+    assert placeholder.content == ERROR_REPLY
+    _assert_no_mentions(placeholder.edits[0])
+
+
+async def test_fast_timeout_and_error_show_no_placeholder(monkeypatch):
+    for side_effect, expected in [
+        (AgentTimeout(), TIMEOUT_REPLY),
+        (RuntimeError("boom"), ERROR_REPLY),
+    ]:
+        router = MagicMock()
+        router.process = AsyncMock(side_effect=side_effect)
+        client = _slow_client(router, monkeypatch)
+        msg = _message("<@999> hi", mentions=[FakeUser(id=999)])
+        await client.on_message(msg)
+        assert len(msg.channel.send_calls) == 1
+        assert assert_first_send_is_reply(msg.channel, to=msg).content == expected
+
+
+async def test_placeholder_edit_failure_falls_back_to_send(monkeypatch):
+    router = MagicMock()
+    router.process = _slow("Recovered answer.")
+    client = _slow_client(router, monkeypatch)
+    msg = _message("<@999> slow", mentions=[FakeUser(id=999)])
+    channel_send = msg.channel.send
+
+    async def send(content=None, **kwargs):
+        sent = await channel_send(content, **kwargs)
+        sent.edit_error = discord.HTTPException(MagicMock(), "gone")
+        return sent
+
+    msg.channel.send = send
+    await client.on_message(msg)
+    sends = msg.channel.send_calls
+    assert len(sends[0].message.edits) == 1
+    # Placeholder send + fallback send of the answer as a reply.
+    assert len(sends) == 2
+    assert sends[1].content == "Recovered answer."
+
+
+async def test_placeholder_send_failure_falls_back_to_send(monkeypatch):
+    router = MagicMock()
+    router.process = _slow("Answer despite no placeholder.")
+    client = _slow_client(router, monkeypatch)
+    msg = _message("<@999> slow", mentions=[FakeUser(id=999)])
+    channel_send = msg.channel.send
+    attempts = []
+
+    async def send(content=None, **kwargs):
+        attempts.append(content)
+        if len(attempts) == 1:
+            raise discord.HTTPException(MagicMock(), "missing permissions")
+        return await channel_send(content, **kwargs)
+
+    msg.channel.send = send
+    await client.on_message(msg)
+    assert attempts == [PLACEHOLDER_REPLY, "Answer despite no placeholder."]
+    assert [c.content for c in msg.channel.send_calls] == [
+        "Answer despite no placeholder."
+    ]
