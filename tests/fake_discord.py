@@ -137,6 +137,19 @@ class FakeTyping:
             raise self.channel.typing_exit_error
         return False
 
+    def __await__(self):
+        """One-shot form (``await channel.typing()``), like discord.py.
+
+        Sends a single trigger; ``typing_enter_error`` makes it raise.
+        """
+        return self._trigger().__await__()
+
+    async def _trigger(self) -> None:
+        self.channel.calls.append(Call("typing.trigger"))
+        self.channel.typing_calls += 1
+        if self.channel.typing_enter_error is not None:
+            raise self.channel.typing_enter_error
+
 
 class FakeChannel:
     """Shared recording behavior for the fake channel types.

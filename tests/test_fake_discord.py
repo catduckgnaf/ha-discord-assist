@@ -110,6 +110,16 @@ async def test_typing_records_and_failure_injection():
             pass
 
 
+async def test_typing_one_shot_trigger():
+    channel = FakeTextChannel()
+    await channel.typing()
+    assert channel.typing_calls == 1
+    assert channel.calls[-1].kind == "typing.trigger"
+    channel.typing_enter_error = RuntimeError("typing down")
+    with pytest.raises(RuntimeError, match="typing down"):
+        await channel.typing()
+
+
 async def test_send_failure_injection():
     channel = FakeTextChannel()
     channel.send_error = RuntimeError("missing permissions")

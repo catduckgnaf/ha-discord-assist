@@ -1,8 +1,10 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 
+import custom_components.discord_assist.bot as bot_module
 from custom_components.discord_assist.bot import TIMEOUT_REPLY, DiscordAssistClient
 from custom_components.discord_assist.conversation_router import AgentTimeout
 from tests.fake_discord import (
@@ -106,7 +108,7 @@ async def test_on_message_replies_when_typing_fails(monkeypatch):
     client = _client(router, monkeypatch)
 
     msg = _message("<@999> lights?", mentions=[FakeUser(id=999)])
-    # Make the typing context manager raise on enter
+    # Fake channel whose typing raises every time it is triggered
     msg.channel.typing_enter_error = discord.HTTPException(MagicMock(), "forbidden")
 
     await client.on_message(msg)
@@ -188,17 +190,69 @@ async def test_long_reply_only_first_piece_is_a_reply(monkeypatch):
     assert all(c.kwargs == {} for c in calls[1:])
 
 
-async def test_typing_failure_after_answer_does_not_rerun_agent(monkeypatch):
-    """If the typing indicator fails on exit, the agent must not run again."""
+async def test_typing_failure_does_not_rerun_agent(monkeypatch):
+    """A typing trigger that raises on every refresh never re-runs the agent."""
+    monkeypatch.setattr(bot_module, "TYPING_REFRESH_SECONDS", 0.01)
     router = MagicMock()
     router.should_respond.return_value = True
-    router.process = AsyncMock(return_value="Unlocked.")
+
+    async def slow_process(**kwargs):
+        await asyncio.sleep(0.05)
+        return "Unlocked."
+
+    router.process = AsyncMock(side_effect=slow_process)
     client = _client(router, monkeypatch)
     msg = _message("<@999> unlock", mentions=[FakeUser(id=999)])
-    msg.channel.typing_exit_error = discord.HTTPException(MagicMock(), "gone")
+    msg.channel.typing_enter_error = discord.HTTPException(MagicMock(), "gone")
     await client.on_message(msg)
     router.process.assert_awaited_once()
+    assert msg.channel.typing_calls > 1
     assert _first_send(msg).content == "Unlocked."
+
+
+async def test_typing_stops_at_cap_while_agent_still_working(monkeypatch):
+    """The indicator stops after the cap even if the agent is still working."""
+    monkeypatch.setattr(bot_module, "TYPING_CAP_SECONDS", 0.03)
+    monkeypatch.setattr(bot_module, "TYPING_REFRESH_SECONDS", 0.01)
+    router = MagicMock()
+    router.should_respond.return_value = True
+    calls_when_agent_finished = []
+
+    async def slow_process(**kwargs):
+        await asyncio.sleep(0.15)
+        calls_when_agent_finished.append(msg.channel.typing_calls)
+        return "Done."
+
+    router.process = AsyncMock(side_effect=slow_process)
+    client = _client(router, monkeypatch)
+    msg = _message("<@999> slow", mentions=[FakeUser(id=999)])
+    await client.on_message(msg)
+
+    router.process.assert_awaited_once()
+    assert _first_send(msg).content == "Done."
+    # Refreshing every 0.01s for the agent's 0.15s would be ~15 triggers;
+    # the 0.03s cap bounds it to a handful, and none happen after the cap.
+    assert 1 <= calls_when_agent_finished[0] <= 5
+    assert msg.channel.typing_calls == calls_when_agent_finished[0]
+
+
+async def test_typing_stops_when_answer_is_ready(monkeypatch):
+    """Typing is cancelled once the reply is ready, well before the cap."""
+    router = MagicMock()
+    router.should_respond.return_value = True
+
+    async def quick_process(**kwargs):
+        await asyncio.sleep(0.01)
+        return "Quick."
+
+    router.process = AsyncMock(side_effect=quick_process)
+    client = _client(router, monkeypatch)
+    msg = _message("<@999> quick", mentions=[FakeUser(id=999)])
+    await client.on_message(msg)
+    await asyncio.sleep(0.05)
+    router.process.assert_awaited_once()
+    assert msg.channel.typing_calls == 1
+    assert _first_send(msg).content == "Quick."
 
 
 async def test_dm_has_no_channel_name(monkeypatch):
