@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 from custom_components.discord_assist.conversation_cache import ConversationCache
@@ -52,14 +53,49 @@ def test_set_none_clears_entry():
     assert cache.get("channel:1") is None
 
 
-async def test_turn_locks_evict_idle_but_keep_held():
+async def test_turn_locks_evict_only_unused_keys():
     from custom_components.discord_assist.conversation_cache import TurnLocks
 
     locks = TurnLocks(max_keys=2)
-    held = locks.get("a")
-    await held.acquire()
-    locks.get("b")
-    locks.get("c")  # evicts "b", the oldest idle lock; "a" is held
-    assert len(locks) == 2
-    assert locks.get("a") is held
-    held.release()
+    async with locks.hold("a"):
+        async with locks.hold("b"):
+            pass
+        async with locks.hold("c"):
+            pass
+        # "b" was idle and evicted; "a" is in use and kept.
+        assert len(locks) == 2
+        assert "b" not in locks._locks
+        assert "a" in locks._locks
+
+
+async def test_turn_locks_keep_key_with_waiter_after_release():
+    """A released lock with a queued turn must not be swapped for a new one."""
+    from custom_components.discord_assist.conversation_cache import TurnLocks
+
+    locks = TurnLocks(max_keys=1)
+    order: list[str] = []
+    first_in = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def first():
+        async with locks.hold("a"):
+            first_in.set()
+            await release_first.wait()
+            order.append("first done")
+
+    async def second():
+        async with locks.hold("a"):
+            order.append("second start")
+
+    t1 = asyncio.create_task(first())
+    await first_in.wait()
+    t2 = asyncio.create_task(second())
+    await asyncio.sleep(0)
+    release_first.set()
+    # While the second turn is waking, another key forces a prune.
+    async with locks.hold("b"):
+        pass
+    async with locks.hold("a"):
+        order.append("third")
+    await asyncio.gather(t1, t2)
+    assert order == ["first done", "second start", "third"]

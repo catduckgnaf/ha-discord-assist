@@ -288,8 +288,9 @@ async def test_agent_timeout_raises():
 
     with patch(_CONVERSE, new=slow), pytest.raises(AgentTimeout):
         await router.process(text="hi", discord_user_id=7, conversation_key="dm:7")
-    # The turn lock was released.
-    assert not router.turns.get("dm:7").locked()
+    # The turn was released, so the next one runs.
+    async with asyncio.timeout(1), router.turns.hold("dm:7"):
+        pass
 
 
 async def test_turns_in_one_conversation_run_one_at_a_time():

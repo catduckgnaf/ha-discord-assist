@@ -203,7 +203,7 @@ class ConversationRouter:
         context = Context(user_id=ha_user_id)
         device_id = self.device_for(where.channel_id, where.parent_id)
 
-        async with self.turns.get(conversation_key):
+        async with self.turns.hold(conversation_key):
             try:
                 async with asyncio.timeout(self.agent_timeout):
                     return await self._converse(
