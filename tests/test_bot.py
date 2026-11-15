@@ -51,13 +51,17 @@ def _first_send(msg):
     return msg.channel.send_calls[0]
 
 
+def _hass():
+    return SimpleNamespace(bus=SimpleNamespace(async_fire=MagicMock()))
+
+
 def _client(router, monkeypatch, *, placeholder_delay=None):
     kwargs = {}
     if placeholder_delay is not None:
         kwargs["placeholder_delay"] = placeholder_delay
     with patch("discord.Client.__init__", return_value=None):
         client = DiscordAssistClient(
-            hass=object(), router=router, status_signal="test_signal", **kwargs
+            hass=_hass(), router=router, status_signal="test_signal", **kwargs
         )
     # discord.Client.user is normally read-only; stub it for tests
     monkeypatch.setattr(
@@ -476,3 +480,125 @@ async def test_placeholder_send_failure_falls_back_to_send(monkeypatch):
     assert [c.content for c in msg.channel.send_calls] == [
         "Answer despite no placeholder."
     ]
+
+
+def _event_client(router, monkeypatch, *, exclude_text=False):
+    router.should_respond.return_value = True
+    router.check_rate_limit.return_value = RateLimitDecision(True, False)
+    router.ha_user_for.return_value = (
+        "ha-a"
+        if isinstance(router.ha_user_for.return_value, MagicMock)
+        else router.ha_user_for.return_value
+    )
+    router.config_entry_id = "entry-123"
+    router.event_exclude_text = exclude_text
+    router.process = AsyncMock(return_value="hi")
+    client = _client(router, monkeypatch)
+    client.hass = SimpleNamespace(bus=SimpleNamespace(async_fire=MagicMock()))
+    return client
+
+
+async def test_accepted_message_fires_event_once_with_fields(monkeypatch):
+    router = MagicMock()
+    client = _event_client(router, monkeypatch)
+    msg = _message("<@999> movie time", mentions=[FakeUser(id=999)])
+    msg.channel.name = "general"
+    await client.on_message(msg)
+    client.hass.bus.async_fire.assert_called_once()
+    event_type, data = client.hass.bus.async_fire.call_args.args
+    context = client.hass.bus.async_fire.call_args.kwargs["context"]
+    assert event_type == "discord_assist_message"
+    # Snowflakes go out as strings so the frontend cannot round them.
+    assert data == {
+        "text": "movie time",
+        "channel_id": "111",
+        "channel_name": "general",
+        "is_dm": False,
+        "discord_user_id": "7",
+        "ha_user_id": "ha-a",
+        "message_id": str(msg.id),
+        "config_entry_id": "entry-123",
+    }
+    assert context.user_id == "ha-a"
+    router.ha_user_for.assert_called_with(7)
+
+
+async def test_rejected_message_fires_no_event(monkeypatch):
+    router = MagicMock()
+    client = _event_client(router, monkeypatch)
+    router.should_respond.return_value = False
+    await client.on_message(_message("random channel chatter"))
+    client.hass.bus.async_fire.assert_not_called()
+    router.process.assert_not_called()
+
+
+async def test_rate_limited_message_fires_no_event(monkeypatch):
+    router = MagicMock()
+    client = _event_client(router, monkeypatch)
+    router.check_rate_limit.return_value = RateLimitDecision(False, False)
+    await client.on_message(_message("<@999> spam", mentions=[FakeUser(id=999)]))
+    client.hass.bus.async_fire.assert_not_called()
+
+
+async def test_unmapped_user_fires_no_event(monkeypatch):
+    """should_respond passing is not enough: no HA identity, no event."""
+    router = MagicMock()
+    router.ha_user_for.return_value = None
+    client = _event_client(router, monkeypatch)
+    await client.on_message(_message("hello", is_dm=True))
+    client.hass.bus.async_fire.assert_not_called()
+
+
+async def test_event_exclude_text_option_omits_text(monkeypatch):
+    router = MagicMock()
+    client = _event_client(router, monkeypatch, exclude_text=True)
+    await client.on_message(_message("secret words", is_dm=True))
+    client.hass.bus.async_fire.assert_called_once()
+    data = client.hass.bus.async_fire.call_args.args[1]
+    assert "text" not in data
+    assert data["ha_user_id"] == "ha-a"
+    assert data["is_dm"] is True
+    assert data["channel_name"] is None
+
+
+async def test_accepted_message_fires_event_on_real_bus(hass, monkeypatch):
+    """End to end on a real HA bus: one event, carrying the HA identity."""
+    from datetime import timedelta
+
+    from custom_components.discord_assist.const import EVENT_MESSAGE
+    from custom_components.discord_assist.conversation_cache import ConversationCache
+    from custom_components.discord_assist.conversation_router import (
+        ConversationRouter,
+    )
+
+    router = ConversationRouter(
+        hass=hass,
+        agent_id="conversation.ollama",
+        language=None,
+        channels={111},
+        respond_dms=True,
+        respond_mentions=True,
+        allowlist=set(),
+        user_map={7: "ha-a"},
+        fallback_user=None,
+        cache=ConversationCache(timedelta(minutes=15)),
+        speaker_context=False,
+        config_entry_id="entry-real",
+    )
+    router.process = AsyncMock(return_value="hi")
+    events = []
+    hass.bus.async_listen(EVENT_MESSAGE, lambda event: events.append(event))
+    with patch("discord.Client.__init__", return_value=None):
+        client = DiscordAssistClient(
+            hass=hass, router=router, status_signal="test_signal"
+        )
+    monkeypatch.setattr(
+        type(client), "user", property(lambda self: SimpleNamespace(id=999))
+    )
+    await client.on_message(_message("movie time"))
+    await hass.async_block_till_done()
+    assert len(events) == 1
+    assert events[0].event_type == EVENT_MESSAGE
+    assert events[0].data["text"] == "movie time"
+    assert events[0].data["config_entry_id"] == "entry-real"
+    assert events[0].context.user_id == "ha-a"

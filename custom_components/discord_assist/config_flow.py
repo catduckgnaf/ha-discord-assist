@@ -40,6 +40,7 @@ from .const import (
     CONF_ALLOWLIST,
     CONF_BOT_ID,
     CONF_CHANNELS,
+    CONF_EVENT_EXCLUDE_TEXT,
     CONF_FALLBACK_USER,
     CONF_IDLE_MINUTES,
     CONF_LANGUAGE,
@@ -54,6 +55,7 @@ from .const import (
     CONF_TOKEN,
     CONF_USER_MAP,
     DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_EVENT_EXCLUDE_TEXT,
     DEFAULT_IDLE_MINUTES,
     DEFAULT_PLACEHOLDER_DELAY,
     DEFAULT_PREFER_LOCAL,
@@ -109,6 +111,9 @@ def build_config_schema(channel_options: list[SelectOptionDict]) -> vol.Schema:
             ),
             vol.Optional(
                 CONF_SPEAKER_CONTEXT, default=DEFAULT_SPEAKER_CONTEXT
+            ): BooleanSelector(),
+            vol.Optional(
+                CONF_EVENT_EXCLUDE_TEXT, default=DEFAULT_EVENT_EXCLUDE_TEXT
             ): BooleanSelector(),
             vol.Optional(
                 CONF_PREFER_LOCAL, default=DEFAULT_PREFER_LOCAL

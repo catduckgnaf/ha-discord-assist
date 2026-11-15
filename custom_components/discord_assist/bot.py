@@ -9,10 +9,10 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import discord
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from .const import DEFAULT_PLACEHOLDER_DELAY
+from .const import DEFAULT_PLACEHOLDER_DELAY, EVENT_MESSAGE
 from .conversation_router import (
     AgentTimeout,
     ConversationRouter,
@@ -341,8 +341,43 @@ class DiscordAssistClient(discord.Client):
             if decision.should_notify:
                 await self._send_reply(message, RATE_LIMIT_REPLY)
             return
+        self._fire_message_event(message, text=text, is_dm=is_dm)
         reply, placeholder = await self._answer(message, text, key, where)
         await self._deliver_reply(message, reply or EMPTY_REPLY, placeholder)
+
+    def _fire_message_event(
+        self, message: discord.Message, *, text: str, is_dm: bool
+    ) -> None:
+        """Fire ``discord_assist_message`` for one accepted message.
+
+        Only called after ``should_respond()`` passes, so rejected messages
+        (including unmapped users, which fail closed) never produce an
+        event. The event carries the sender's HA identity as its context;
+        without one, no event is fired at all.
+        """
+        ha_user_id = self.router.ha_user_for(message.author.id)
+        if ha_user_id is None:
+            return
+        # Discord ids are 64-bit snowflakes, beyond what the frontend can
+        # hold as a JS number, so they go out as strings (as Discord's own
+        # API sends them) and automations match them reliably.
+        message_id = getattr(message, "id", None)
+        data: dict[str, object] = {
+            "channel_id": str(message.channel.id),
+            "channel_name": None if is_dm else getattr(message.channel, "name", None),
+            "is_dm": is_dm,
+            "discord_user_id": str(message.author.id),
+            "ha_user_id": ha_user_id,
+            "message_id": None if message_id is None else str(message_id),
+            "config_entry_id": self.router.config_entry_id,
+        }
+        # Event data is stored by the recorder; the privacy option omits
+        # the message text entirely instead of blanking it.
+        if not self.router.event_exclude_text:
+            data["text"] = text
+        self.hass.bus.async_fire(
+            EVENT_MESSAGE, data, context=Context(user_id=ha_user_id)
+        )
 
     async def _send_reply(self, message: discord.Message, reply: str) -> None:
         """First piece replies to the message (no ping); the rest follow it.

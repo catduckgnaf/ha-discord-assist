@@ -21,6 +21,7 @@ from .const import (
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
     CONF_CHANNELS,
+    CONF_EVENT_EXCLUDE_TEXT,
     CONF_FALLBACK_USER,
     CONF_IDLE_MINUTES,
     CONF_LANGUAGE,
@@ -33,6 +34,7 @@ from .const import (
     CONF_SPEAKER_CONTEXT,
     CONF_USER_MAP,
     DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_EVENT_EXCLUDE_TEXT,
     DEFAULT_IDLE_MINUTES,
     DEFAULT_PREFER_LOCAL,
     DEFAULT_RATE_LIMIT_BURST,
@@ -171,6 +173,8 @@ class ConversationRouter:
     rate_limit_burst: int = DEFAULT_RATE_LIMIT_BURST
     rate_limiter: RateLimiter | None = None
     turns: TurnLocks = field(default_factory=TurnLocks)
+    config_entry_id: str | None = None
+    event_exclude_text: bool = DEFAULT_EVENT_EXCLUDE_TEXT
 
     def __post_init__(self) -> None:
         if self.rate_limiter is None:
@@ -367,6 +371,10 @@ class ConversationRouter:
             speaker_context=opts.get(CONF_SPEAKER_CONTEXT, DEFAULT_SPEAKER_CONTEXT),
             prefer_local=opts.get(CONF_PREFER_LOCAL, DEFAULT_PREFER_LOCAL),
             agent_timeout=float(opts.get(CONF_AGENT_TIMEOUT, DEFAULT_AGENT_TIMEOUT)),
+            config_entry_id=getattr(entry, "entry_id", None),
+            event_exclude_text=bool(
+                opts.get(CONF_EVENT_EXCLUDE_TEXT, DEFAULT_EVENT_EXCLUDE_TEXT)
+            ),
             rate_limit_per_minute=_coerce_int_option(
                 opts, CONF_RATE_LIMIT_PER_MINUTE, DEFAULT_RATE_LIMIT_PER_MINUTE
             ),

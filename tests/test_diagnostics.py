@@ -257,7 +257,7 @@ async def test_on_message_error_is_recorded_without_message_text(monkeypatch):
     errors = RecentErrors()
     with patch("discord.Client.__init__", return_value=None):
         client = DiscordAssistClient(
-            hass=object(),
+            hass=SimpleNamespace(bus=SimpleNamespace(async_fire=MagicMock())),
             router=router,
             status_signal="test_signal",
             recent_errors=errors,
