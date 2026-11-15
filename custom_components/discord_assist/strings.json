@@ -62,10 +62,36 @@
         "title": "Discord Assist options",
         "menu_options": {
           "settings": "Conversation settings",
+          "agent": "Bundled agent (model and tools)",
           "add_user_map": "Add a Discord-to-Home-Assistant user mapping",
           "remove_user_map": "Remove a user mapping",
           "add_room": "Treat a channel as a room",
           "remove_room": "Remove a room channel"
+        }
+      },
+      "agent": {
+        "title": "Bundled agent",
+        "description": "Discord Assist can be its own conversation agent, calling an OpenAI-compatible chat completions endpoint. Tools come from Home Assistant LLM APIs (for example Assist, or ha-mcp's in-process server) and every call passes through the tool gate: dangerous tools such as restart, backup, file and shell tools are refused unless an owner user explicitly lists them.",
+        "data": {
+          "agent_base_url": "Model endpoint base URL",
+          "agent_model": "Model name",
+          "agent_api_key": "Model endpoint API key",
+          "agent_max_tokens": "Max tokens per reply",
+          "agent_temperature": "Temperature",
+          "agent_max_tool_calls": "Max tool calls per turn",
+          "agent_llm_apis": "Tool sources (LLM APIs)",
+          "agent_allowed_tools": "Allowed tools (blank = all offered tools)",
+          "agent_owner_tools": "Owner tools (dangerous tools allowed for owner users)",
+          "agent_owner_users": "Owner Home Assistant users",
+          "agent_confirm_tools": "Tools that require approval (a tool name, or domain: followed by a domain)"
+        },
+        "data_description": {
+          "agent_base_url": "Base URL of an OpenAI-compatible endpoint, for example http://localhost:1234/v1. Chat completions are posted to the base URL plus /chat/completions.",
+          "agent_api_key": "Stored in the entry's data, never in its options. Leave blank to keep the current key.",
+          "agent_llm_apis": "APIs whose tools the agent may use. The built-in Assist API runs as the speaker's Home Assistant user. ha-mcp's API runs as ha-mcp's administrator account; the tool gate is the boundary for it. An empty list means no tools.",
+          "agent_allowed_tools": "When set, the model only ever sees these tools and nothing else can run.",
+          "agent_owner_tools": "Dangerous tools (restart, backups, file or shell access) stay refused for everyone unless named here, and even then only owner users may use them.",
+          "agent_confirm_tools": "Matching calls are refused until Discord approval buttons are available; listing a tool here keeps it off until then."
         }
       },
       "settings": {
@@ -120,6 +146,11 @@
     "binary_sensor": {
       "gateway": {
         "name": "Discord gateway"
+      }
+    },
+    "conversation": {
+      "agent": {
+        "name": "Discord Assist agent"
       }
     }
   },

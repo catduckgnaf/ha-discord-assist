@@ -27,6 +27,7 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 - `Discord gateway` connectivity sensor for alerting
 - Repair issues for "nobody is authorized" and a missing Message Content intent
 - One-click import from the Discord Conversation integration it was forked from
+- Optional bundled conversation agent: bring your own OpenAI-compatible model endpoint, with every tool call checked by a permission gate (see [Bundled agent](#bundled-agent))
 
 ## Security model
 
@@ -133,6 +134,39 @@ Map a Discord user ID to a specific Home Assistant user so commands run with tha
 ### Fallback user
 
 Set **Fallback Home Assistant user** in options to control which HA user is used for Discord users who have no explicit mapping. Use a dedicated, least-privilege account for this.
+
+## Bundled agent
+
+Discord Assist can be its own conversation agent. Instead of picking another integration's agent, select the **Discord Assist agent** wherever an agent is chosen (including Discord Assist's own conversation settings). It answers from any OpenAI-compatible chat completions endpoint (a local server such as LM Studio or llama.cpp, or a hosted one), keeps history in Home Assistant's ChatLog like core agents, and honors the speaker context extra prompt.
+
+Configure it under **Configure → Bundled agent (model and tools)**: base URL, model name, API key (stored in the entry's data, never in its options, and never written to logs), max tokens, temperature, and a cap on tool calls per turn. Until a base URL and model are set, the agent answers with a "not configured" error instead of failing setup.
+
+### Tool sources
+
+Tools come from Home Assistant **LLM APIs** chosen in the same settings screen:
+
+- The built-in **Assist** API ("Device control"). Its calls run with the speaker's `Context`, so Home Assistant's own per-user permissions apply inside it too.
+- **ha-mcp's in-process server**, if installed. ha-mcp can run inside Home Assistant and register its full tool catalog as an LLM API; pick that API as a tool source and no MCP client, URL, or token is needed. (This means running ha-mcp's in-process server instead of the ha-mcp app; ha-mcp's docs say to run one install method only, and existing MCP clients would need the new connect URL.)
+
+The default is the Assist API only. An empty tool-source list means the model gets no tools at all.
+
+### The tool gate
+
+Every tool call the model makes passes through one gate in Discord Assist before anything runs:
+
+1. **Offered only.** The model is only shown tools that pass the checks below, and a call naming a tool it was never shown is refused anyway.
+2. **Allowlist.** If an allowed-tools list is set, only those tools are ever shown or run.
+3. **Dangerous tools are denied.** Tools that restart or stop Home Assistant, manage backups or add-ons, write files or YAML, or run shell or raw websocket commands are refused, and denied services stay denied when a generic service caller is asked to run them. The one exception: a tool named in the **owner tools** list may run, but only for a Home Assistant user named in the **owner users** list.
+4. **Permissions.** For every entity a call names, the speaker's Home Assistant user must hold `read` permission (for read-only tools) or `control` permission (for anything that changes state). ha-mcp calls do not get this check from Home Assistant itself, because ha-mcp runs as an administrator; the gate is the check.
+5. **Confirmation list.** Tools (or `domain:<domain>` entries) on the confirmation list are refused for now: they will run only after a Discord Approve press once approval buttons land, and the gate fails closed until then.
+
+Every allowed and refused call is logged and fires a `discord_assist_tool_call` event with the tool, the Home Assistant user, the entities involved, and the outcome, so automations can audit or alert on agent activity.
+
+### Security notes for the bundled agent
+
+- **ha-mcp runs as an administrator account.** Home Assistant's per-user permissions do not apply to calls made through it, so the gate above is the security boundary for ha-mcp tools. It is a hard boundary in one sense (the model can only call what is forwarded), and it is only as good as its argument checks.
+- A fresh setup is conservative: the model can answer questions and, through the Assist API, read and control only what the speaker's Home Assistant user may control. Nobody gets restart, file, backup, or shell tools unless an owner user explicitly lists them.
+- Everyone who can talk to the agent can try to prompt-inject it. Keep dangerous tools owner-listed, put destructive tools on the confirmation list, and prefer least-privilege Home Assistant users for Discord mappings.
 
 ## Development
 
