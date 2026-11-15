@@ -201,11 +201,43 @@ User mapping beats role mapping; deny beats allow; no match means ignored
 
 ### Phasing
 
-| Phase | Ships | Depends on |
-| --- | --- | --- |
-| A | Profiles in options, user and role mapping, per-profile HA user, channel and DM rules, quiet hours, rate limit, per-profile agent, audit event | nothing |
-| B | Scoped tools per profile (areas, domains, entity allow and deny, read-only tools) | the bundled agent (#40) |
-| C | Approval buttons for sensitive tools, approver list | B and the button dispatcher (suggestion 9) |
+| Phase | Ships | Depends on | Status |
+| --- | --- | --- | --- |
+| A | Profiles in options, user and role mapping, per-profile HA user, channel and DM rules, quiet hours, rate limit, per-profile agent, audit event | nothing | #12, draft PR #59 open |
+| B | Scoped tools per profile (areas, domains, entity allow and deny, read-only tools) | the bundled agent (#40) | #34 and #40 in progress, draft PRs pending |
+| C | Approval buttons for sensitive tools, approver list | B and the button dispatcher (suggestion 9) | #35 in progress, draft PR pending |
+
+### Tracking (epic #39)
+
+Status as of 2026-11-15. Every phase was built as an independent draft pull
+request branched from `main`; each lane carried the smallest self-contained
+substrate it needed, so the phases can land in any order. Merging is
+catduck's alone. Where two lanes built overlapping substrate (button
+stores, profile scope), the convergence is a rebase at merge time, named in
+each pull request.
+
+| Work item | Issue | Draft PR | Status |
+| --- | --- | --- | --- |
+| Phase A: profiles, user and role mapping, gatekeeping, audit | #12 | #59 | Draft open |
+| Phase B: scoped LLM API | #34 | pending | In progress |
+| Phase C: approval buttons, approver list | #35 | pending | In progress |
+| Bundled agent with ha-mcp tools (implements phases B and C) | #40 | pending | In progress |
+| In-process ha-mcp LLM API for the bundled agent | #41 | pending | In progress |
+| Decision: which agent Luna runs behind | #36 | n/a | Decided, issue closed (bundled agent, #40) |
+| Decision: Server Members intent for role mapping | #37 | #65 | Draft open |
+| Decision: shared-channel history per profile | #38 | #64 | Draft open |
+
+Supporting work the phases build on, also delivered as draft pull requests:
+the button dispatcher (#13, draft PR #43) and acknowledge first (#14, draft
+PR #48) under phases B and C; per-user rate limit (#28, draft PR #44) and
+agent per channel or user (#18, draft PR #55) under phase A gatekeeping;
+re-read state before acting (#30, draft PR #63) under phase C approvals.
+
+Remainder for this epic: the four "in progress" rows need their draft PR
+numbers filled in as those lanes deliver, and each phase's checkbox on #39
+is ticked only when its pull request merges. The live-server check that
+partial-member payloads carry roles (the open remainder on #37) is
+catduck's to run on a real server.
 
 ### Decision: a bundled agent with ha-mcp tools (2026-11-15)
 
@@ -227,10 +259,16 @@ are in issue #40.
 - ~~Which agent should Luna run behind?~~ Decided: the bundled agent above (#36, #40).
 - (Original question) Tier 3 needs an agent that supports Home
   Assistant LLM APIs; Extended OpenAI Conversation does not.
-- Discord roles need the Server Members intent to read member roles reliably.
-  It is a privileged intent; acceptable for a private server.
-- Should profiles also restrict which conversation history a user can see in
-  shared channels?
+- ~~Discord roles need the Server Members intent to read member roles
+  reliably.~~ Decided (#37, draft PR #65): no privileged intent; roles come
+  from the message's member payload first, with a cached `fetch_member`
+  fallback, and a repair issue if role mapping is configured but roles
+  cannot be resolved. The live-server check of partial-member payloads
+  stays open on #37.
+- ~~Should profiles also restrict which conversation history a user can see
+  in shared channels?~~ Decided (#38, draft PR #64): guild channels keep one
+  shared conversation by default; a `conversation_scope` option switches
+  channels to per-user history. DMs are always per user.
 
 ## 0.3.1 (built)
 
@@ -246,4 +284,6 @@ issue.
 7. Agent tuning guide in the docs (30).
 
 0.4.0: permissions phase A (#12), the button dispatcher (#13, #14), and the
-bundled agent with ha-mcp tools (#40), which delivers phases B and C.
+bundled agent with ha-mcp tools (#40), which delivers phases B and C. Live
+status for all of it is in the tracking table under "Per-user permissions:
+scope" above (epic #39).
