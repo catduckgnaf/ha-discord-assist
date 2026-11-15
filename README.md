@@ -115,6 +115,10 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for what is planned to make this easier.
 
 A voice satellite knows which room it is in; a Discord channel does not, unless you tell it. In options, choose **Treat a channel as a room**, pick the channel, and pick any device in that room's area. Messages in that channel and its threads are sent with that device, so the built-in agent and LLM agents using Home Assistant's Assist API treat the device's area as the default room. With speaker context on, the room name is also in the prompt for agents that read it.
 
+## Per-user and per-channel agents
+
+One agent does not have to serve everyone. In options, choose **Use a specific agent in a channel** or **Use a specific agent for a Discord user** and pick a conversation agent, for example local-only Assist for a kids' channel and an LLM for the family channel. Precedence is: the user's agent, then the channel's agent, then the agent chosen in the main settings. Threads use their parent channel's agent. Each agent keeps its own conversation in a channel, so switching agents never mixes conversation history. "Built-in commands first" still applies on top of the chosen agent.
+
 ## User mapping
 
 Map a Discord user ID to a specific Home Assistant user so commands run with that user's permissions.

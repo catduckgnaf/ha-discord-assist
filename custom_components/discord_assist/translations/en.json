@@ -65,7 +65,11 @@
           "add_user_map": "Add a Discord-to-Home-Assistant user mapping",
           "remove_user_map": "Remove a user mapping",
           "add_room": "Treat a channel as a room",
-          "remove_room": "Remove a room channel"
+          "remove_room": "Remove a room channel",
+          "add_agent_user": "Use a specific agent for a Discord user",
+          "remove_agent_user": "Remove a per-user agent",
+          "add_agent_channel": "Use a specific agent in a channel",
+          "remove_agent_channel": "Remove a per-channel agent"
         }
       },
       "settings": {
@@ -110,10 +114,40 @@
         "data": {
           "channel_id": "Discord channel ID"
         }
+      },
+      "add_agent_user": {
+        "title": "Agent for a user",
+        "description": "This Discord user always talks to the chosen agent, in any channel. A user agent wins over a channel agent and the default agent.",
+        "data": {
+          "discord_user_id": "Discord user ID",
+          "agent_id": "Conversation agent"
+        }
+      },
+      "remove_agent_user": {
+        "title": "Remove per-user agent",
+        "data": {
+          "discord_user_id": "Discord user ID"
+        }
+      },
+      "add_agent_channel": {
+        "title": "Agent for a channel",
+        "description": "Requests in this channel and its threads use the chosen agent, unless the user has their own agent.",
+        "data": {
+          "channel_id": "Discord channel",
+          "agent_id": "Conversation agent"
+        }
+      },
+      "remove_agent_channel": {
+        "title": "Remove per-channel agent",
+        "data": {
+          "channel_id": "Discord channel ID"
+        }
       }
     },
     "abort": {
-      "no_rooms": "No channels are mapped to rooms."
+      "no_rooms": "No channels are mapped to rooms.",
+      "no_user_agents": "No Discord users have their own agent.",
+      "no_channel_agents": "No channels have their own agent."
     }
   },
   "entity": {

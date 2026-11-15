@@ -18,6 +18,8 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_AGENT_ID,
+    CONF_AGENT_MAP_CHANNEL,
+    CONF_AGENT_MAP_USER,
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
     CONF_CHANNELS,
@@ -94,9 +96,21 @@ def _clean_name(value: str | None) -> str | None:
     return cleaned[:_MAX_NAME_LENGTH] or None
 
 
-def make_conversation_key(*, is_dm: bool, channel_id: int, author_id: int) -> str:
-    """One conversation per DM (by user) or per channel."""
-    return f"dm:{author_id}" if is_dm else f"channel:{channel_id}"
+def make_conversation_key(
+    *,
+    is_dm: bool,
+    channel_id: int,
+    author_id: int,
+    agent_id: str | None = None,
+) -> str:
+    """One conversation per DM (by user) or per channel, per agent.
+
+    The agent segment matters: a conversation_id belongs to the agent that
+    created it, so switching agents must never reuse another agent's id.
+    Without an agent segment the key falls back to the plain location key.
+    """
+    base = f"dm:{author_id}" if is_dm else f"channel:{channel_id}"
+    return f"{base}:agent:{agent_id}" if agent_id else base
 
 
 def resolve_ha_user_id(
@@ -134,6 +148,8 @@ class ConversationRouter:
     fallback_user: str | None
     cache: ConversationCache
     room_map: dict[int, str] = field(default_factory=dict)
+    agent_map_user: dict[int, str] = field(default_factory=dict)
+    agent_map_channel: dict[int, str] = field(default_factory=dict)
     speaker_context: bool = DEFAULT_SPEAKER_CONTEXT
     prefer_local: bool = DEFAULT_PREFER_LOCAL
     agent_timeout: float = DEFAULT_AGENT_TIMEOUT
@@ -167,6 +183,27 @@ class ConversationRouter:
         if parent_id is not None:
             return self.room_map.get(parent_id)
         return None
+
+    def agent_for(
+        self,
+        discord_user_id: int,
+        channel_id: int | None = None,
+        parent_id: int | None = None,
+    ) -> str | None:
+        """Conversation agent for a message: user, then channel, then default.
+
+        A thread inherits its parent channel's agent, the same way it
+        inherits the parent's room and listening setting. This is the single
+        resolution point: permissions phase A (issue #12) should reuse it
+        for its per-profile agent instead of duplicating the precedence.
+        """
+        if discord_user_id in self.agent_map_user:
+            return self.agent_map_user[discord_user_id]
+        if channel_id in self.agent_map_channel:
+            return self.agent_map_channel[channel_id]
+        if parent_id is not None:
+            return self.agent_map_channel.get(parent_id, self.agent_id)
+        return self.agent_id
 
     def should_respond(
         self,
@@ -202,12 +239,13 @@ class ConversationRouter:
         where = where or MessageContext()
         context = Context(user_id=ha_user_id)
         device_id = self.device_for(where.channel_id, where.parent_id)
+        agent_id = self.agent_for(discord_user_id, where.channel_id, where.parent_id)
 
         async with self.turns.hold(conversation_key):
             try:
                 async with asyncio.timeout(self.agent_timeout):
                     return await self._converse(
-                        text, conversation_key, context, device_id, where
+                        text, conversation_key, context, device_id, where, agent_id
                     )
             except TimeoutError as err:
                 raise AgentTimeout from err
@@ -219,8 +257,11 @@ class ConversationRouter:
         context: Context,
         device_id: str | None,
         where: MessageContext,
+        agent_id: str | None,
     ) -> str:
-        if self.prefer_local and self.agent_id != LOCAL_AGENT_ID:
+        # Prefer-local applies on top of the resolved agent: the local agent
+        # is tried first unless the resolved agent already is the local one.
+        if self.prefer_local and agent_id != LOCAL_AGENT_ID:
             # No conversation_id: the local agent is stateless here, and the
             # LLM's history is left alone.
             local = await async_converse(
@@ -246,7 +287,7 @@ class ConversationRouter:
             self.cache.get(conversation_key),
             context,
             language=self.language,
-            agent_id=self.agent_id,
+            agent_id=agent_id,
             device_id=device_id,
             extra_system_prompt=extra,
         )
@@ -304,6 +345,12 @@ class ConversationRouter:
                 timedelta(minutes=opts.get(CONF_IDLE_MINUTES, DEFAULT_IDLE_MINUTES))
             ),
             room_map=_coerce_int_keys(opts.get(CONF_ROOM_MAP), "room channel id"),
+            agent_map_user=_coerce_int_keys(
+                opts.get(CONF_AGENT_MAP_USER), "agent Discord user id"
+            ),
+            agent_map_channel=_coerce_int_keys(
+                opts.get(CONF_AGENT_MAP_CHANNEL), "agent channel id"
+            ),
             speaker_context=opts.get(CONF_SPEAKER_CONTEXT, DEFAULT_SPEAKER_CONTEXT),
             prefer_local=opts.get(CONF_PREFER_LOCAL, DEFAULT_PREFER_LOCAL),
             agent_timeout=float(opts.get(CONF_AGENT_TIMEOUT, DEFAULT_AGENT_TIMEOUT)),

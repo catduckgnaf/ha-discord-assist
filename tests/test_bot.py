@@ -73,6 +73,21 @@ async def test_on_message_dispatches_and_replies(monkeypatch):
     assert where.channel_id == 111
 
 
+async def test_on_message_key_includes_resolved_agent(monkeypatch):
+    """The conversation key carries the agent from agent_for, so agents
+    never share a conversation_id in the same channel."""
+    router = MagicMock()
+    router.should_respond.return_value = True
+    router.agent_for.return_value = "conversation.kids"
+    router.process = AsyncMock(return_value="hi")
+    client = _client(router, monkeypatch)
+    msg = _message("<@999> hi", mentions=[SimpleNamespace(id=999)])
+    await client.on_message(msg)
+    router.agent_for.assert_called_once_with(7, 111, None)
+    key = router.process.call_args.kwargs["conversation_key"]
+    assert key == "channel:111:agent:conversation.kids"
+
+
 async def test_on_message_ignores_other_bots(monkeypatch):
     router = MagicMock()
     client = _client(router, monkeypatch)

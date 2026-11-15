@@ -23,6 +23,8 @@ CONF_SPEAKER_CONTEXT = "speaker_context"
 CONF_PREFER_LOCAL = "prefer_local"
 CONF_AGENT_TIMEOUT = "agent_timeout"
 CONF_ROOM_MAP = "room_map"
+CONF_AGENT_MAP_USER = "agent_map_user"
+CONF_AGENT_MAP_CHANNEL = "agent_map_channel"
 
 DEFAULT_RESPOND_DMS = True
 DEFAULT_RESPOND_MENTIONS = True

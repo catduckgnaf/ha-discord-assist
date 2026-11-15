@@ -79,8 +79,16 @@ class DiscordAssistClient(discord.Client):
         if not text:
             return
 
+        # The key carries the resolved agent: a conversation_id belongs to
+        # the agent that created it, so a different agent must not reuse it.
+        agent_id = self.router.agent_for(
+            message.author.id, message.channel.id, parent_id
+        )
         key = make_conversation_key(
-            is_dm=is_dm, channel_id=message.channel.id, author_id=message.author.id
+            is_dm=is_dm,
+            channel_id=message.channel.id,
+            author_id=message.author.id,
+            agent_id=agent_id,
         )
         where = MessageContext(
             display_name=getattr(message.author, "display_name", None),
