@@ -20,18 +20,29 @@ CONF_ALLOWLIST = "allowlist"
 CONF_USER_MAP = "user_map"
 CONF_FALLBACK_USER = "fallback_ha_user"
 CONF_SPEAKER_CONTEXT = "speaker_context"
+CONF_EVENT_EXCLUDE_TEXT = "event_exclude_text"
 CONF_PREFER_LOCAL = "prefer_local"
 CONF_AGENT_TIMEOUT = "agent_timeout"
+CONF_PLACEHOLDER_DELAY = "placeholder_delay"
 CONF_ROOM_MAP = "room_map"
 CONF_AGENT_MAP_USER = "agent_map_user"
 CONF_AGENT_MAP_CHANNEL = "agent_map_channel"
+CONF_RATE_LIMIT_PER_MINUTE = "rate_limit_per_minute"
+CONF_RATE_LIMIT_BURST = "rate_limit_burst"
 
 DEFAULT_RESPOND_DMS = True
 DEFAULT_RESPOND_MENTIONS = True
 DEFAULT_IDLE_MINUTES = 15
 DEFAULT_SPEAKER_CONTEXT = True
+DEFAULT_EVENT_EXCLUDE_TEXT = False
 DEFAULT_PREFER_LOCAL = False
+
+# Event fired on the HA bus once per accepted Discord message.
+EVENT_MESSAGE = f"{DOMAIN}_message"
 DEFAULT_AGENT_TIMEOUT = 60
+DEFAULT_RATE_LIMIT_PER_MINUTE = 10
+DEFAULT_RATE_LIMIT_BURST = 3
+DEFAULT_PLACEHOLDER_DELAY = 3.0
 
 # Home Assistant's built-in intent agent, tried first when prefer_local is on.
 LOCAL_AGENT_ID = "conversation.home_assistant"
@@ -41,6 +52,7 @@ RECONNECT_DELAY = 60
 
 ISSUE_NO_AUTHORIZED_USERS = "no_authorized_users"
 ISSUE_MESSAGE_CONTENT_INTENT = "message_content_intent"
+ISSUE_DUPLICATE_TOKEN = "duplicate_token"
 
 
 def signal_connection(entry_id: str) -> str:

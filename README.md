@@ -25,6 +25,7 @@ A Home Assistant custom integration that exposes the Assist conversation agent o
 - Replies can never ping `@everyone`, roles, or users
 - Retries setup when Discord is unreachable and reloads if the gateway dies
 - `Discord gateway` connectivity sensor for alerting
+- `discord_assist_message` event for every accepted message, so automations can react without the agent (with an option to exclude the message text for privacy)
 - Repair issues for "nobody is authorized" and a missing Message Content intent
 - One-click import from the Discord Conversation integration it was forked from
 
@@ -108,8 +109,47 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for what is planned to make this easier.
 | Language | (HA default) | BCP-47 language tag passed to the conversation agent |
 | Allowed Discord user IDs | (none) | Discord user IDs allowed to use the bot as the fallback user; mapped users are always allowed |
 | Speaker context | Yes | Sends the agent the speaker's Discord name and Home Assistant user, the channel, the room (for room channels), and the local time, as extra system prompt text. Agents that ignore extra prompt text are unaffected |
+| Exclude message text from events | No | Omits the `text` field from the `discord_assist_message` event (see below). Event data is stored by the recorder, so turn this on if you do not want message text in your history |
 | Built-in commands first | No | Tries `conversation.home_assistant` first and only asks your agent when the built-in agent does not understand the request or finds no matching device. A command it matched but failed is not retried, so nothing runs twice |
 | Agent timeout | 60 s | Gives up and says so instead of typing forever |
+
+## Automations from Discord messages
+
+For every message the bot accepts (after the access and channel rules above pass; rejected messages, including unmapped users, never produce one), Discord Assist fires a `discord_assist_message` event on the Home Assistant event bus. Automations can react to keywords without involving the conversation agent at all.
+
+The event data is:
+
+| Field | Description |
+|-------|-------------|
+| `text` | The message text, with the bot's own mention stripped. Omitted entirely when **Exclude message text from events** is on |
+| `channel_id` | Discord channel (or DM) ID, as a string |
+| `channel_name` | Channel name, or `null` for direct messages |
+| `is_dm` | Whether the message was a direct message |
+| `discord_user_id` | Discord user ID of the sender, as a string |
+| `ha_user_id` | Home Assistant user the sender acts as; the event's context carries the same user |
+| `message_id` | Discord message ID, as a string |
+| `config_entry_id` | The Discord Assist config entry that received the message |
+
+Example: turn on a light when someone posts "movie time" in a channel, without asking the agent:
+
+```yaml
+automation:
+  - alias: "Movie time from Discord"
+    triggers:
+      - trigger: event
+        event_type: discord_assist_message
+        event_data:
+          channel_id: "123456789012345678"
+    conditions:
+      - condition: template
+        value_template: "{{ 'movie time' in trigger.event.data.text | lower }}"
+    actions:
+      - action: light.turn_on
+        target:
+          entity_id: light.living_room
+```
+
+**Privacy:** event data is stored by the recorder and can appear in your history and logbook. If you do not want message text stored, turn on **Exclude message text from events** in the integration options; automations can still match on the channel, user, and other fields, just not on `text`.
 
 ## Room channels
 

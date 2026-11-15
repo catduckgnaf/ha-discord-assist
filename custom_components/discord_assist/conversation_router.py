@@ -23,24 +23,35 @@ from .const import (
     CONF_AGENT_TIMEOUT,
     CONF_ALLOWLIST,
     CONF_CHANNELS,
+    CONF_EVENT_EXCLUDE_TEXT,
     CONF_FALLBACK_USER,
     CONF_IDLE_MINUTES,
     CONF_LANGUAGE,
     CONF_PREFER_LOCAL,
+    CONF_RATE_LIMIT_BURST,
+    CONF_RATE_LIMIT_PER_MINUTE,
     CONF_RESPOND_DMS,
     CONF_RESPOND_MENTIONS,
     CONF_ROOM_MAP,
     CONF_SPEAKER_CONTEXT,
     CONF_USER_MAP,
     DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_EVENT_EXCLUDE_TEXT,
     DEFAULT_IDLE_MINUTES,
     DEFAULT_PREFER_LOCAL,
+    DEFAULT_RATE_LIMIT_BURST,
+    DEFAULT_RATE_LIMIT_PER_MINUTE,
     DEFAULT_RESPOND_DMS,
     DEFAULT_RESPOND_MENTIONS,
     DEFAULT_SPEAKER_CONTEXT,
     LOCAL_AGENT_ID,
 )
-from .conversation_cache import ConversationCache, TurnLocks
+from .conversation_cache import (
+    ConversationCache,
+    RateLimitDecision,
+    RateLimiter,
+    TurnLocks,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -55,6 +66,19 @@ _MAX_NAME_LENGTH = 64
 
 class AgentTimeout(Exception):
     """The conversation agent did not answer in time."""
+
+
+class RateLimited(Exception):
+    """A request was refused by the per-user rate limit before the agent ran.
+
+    ``should_notify`` is True only for the first refusal in a throttle
+    window: the bot sends one "Slow down" reply for that refusal and
+    stays silent for the rest.
+    """
+
+    def __init__(self, should_notify: bool = False) -> None:
+        super().__init__("Rate limit exceeded")
+        self.should_notify = should_notify
 
 
 @dataclass(frozen=True)
@@ -86,6 +110,14 @@ def _coerce_int_keys(mapping, field_name) -> dict[int, str]:
         except TypeError, ValueError:
             _LOGGER.warning("Ignoring non-numeric %s key: %r", field_name, key)
     return result
+
+
+def _coerce_int_option(opts, key: str, default: int) -> int:
+    try:
+        return int(opts.get(key, default))
+    except TypeError, ValueError:
+        _LOGGER.warning("Ignoring non-numeric %s value: %r", key, opts.get(key))
+        return default
 
 
 def _clean_name(value: str | None) -> str | None:
@@ -153,7 +185,18 @@ class ConversationRouter:
     speaker_context: bool = DEFAULT_SPEAKER_CONTEXT
     prefer_local: bool = DEFAULT_PREFER_LOCAL
     agent_timeout: float = DEFAULT_AGENT_TIMEOUT
+    rate_limit_per_minute: int = DEFAULT_RATE_LIMIT_PER_MINUTE
+    rate_limit_burst: int = DEFAULT_RATE_LIMIT_BURST
+    rate_limiter: RateLimiter | None = None
     turns: TurnLocks = field(default_factory=TurnLocks)
+    config_entry_id: str | None = None
+    event_exclude_text: bool = DEFAULT_EVENT_EXCLUDE_TEXT
+
+    def __post_init__(self) -> None:
+        if self.rate_limiter is None:
+            self.rate_limiter = RateLimiter(
+                self.rate_limit_per_minute, self.rate_limit_burst
+            )
 
     @property
     def has_authorized_users(self) -> bool:
@@ -225,6 +268,36 @@ class ConversationRouter:
             return self.respond_mentions
         return False
 
+    def conversation_key(
+        self,
+        *,
+        is_dm: bool,
+        channel_id: int,
+        author_id: int,
+        parent_id: int | None = None,
+    ) -> str:
+        """The conversation key for one request, carrying its resolved agent.
+
+        Every entry point (messages, interactions) builds its key here, so
+        the key always names the agent ``process`` will actually use.
+        """
+        return make_conversation_key(
+            is_dm=is_dm,
+            channel_id=channel_id,
+            author_id=author_id,
+            agent_id=self.agent_for(author_id, channel_id, parent_id),
+        )
+
+    def check_rate_limit(self, discord_user_id: int) -> RateLimitDecision:
+        """Consume one rate-limit token for a Discord user.
+
+        Testable at router level: the decision says whether the request
+        may proceed and, when it may not, whether this refusal is the
+        one that should get a "Slow down" notice.
+        """
+        assert self.rate_limiter is not None  # set in __post_init__
+        return self.rate_limiter.check(str(discord_user_id))
+
     async def process(
         self,
         *,
@@ -232,10 +305,21 @@ class ConversationRouter:
         discord_user_id: int,
         conversation_key: str,
         where: MessageContext | None = None,
+        rate_checked: bool = False,
     ) -> str:
+        """Run one authorized turn through the conversation agent.
+
+        ``rate_checked`` is True when the caller already consumed this
+        request's rate-limit token (the message path throttles before it
+        starts typing); otherwise the limit is enforced here.
+        """
         ha_user_id = self.ha_user_for(discord_user_id)
         if ha_user_id is None:
             raise PermissionError(f"Discord user {discord_user_id} is not authorized")
+        if not rate_checked:
+            decision = self.check_rate_limit(discord_user_id)
+            if not decision.allowed:
+                raise RateLimited(decision.should_notify)
         where = where or MessageContext()
         context = Context(user_id=ha_user_id)
         device_id = self.device_for(where.channel_id, where.parent_id)
@@ -354,4 +438,14 @@ class ConversationRouter:
             speaker_context=opts.get(CONF_SPEAKER_CONTEXT, DEFAULT_SPEAKER_CONTEXT),
             prefer_local=opts.get(CONF_PREFER_LOCAL, DEFAULT_PREFER_LOCAL),
             agent_timeout=float(opts.get(CONF_AGENT_TIMEOUT, DEFAULT_AGENT_TIMEOUT)),
+            config_entry_id=getattr(entry, "entry_id", None),
+            event_exclude_text=bool(
+                opts.get(CONF_EVENT_EXCLUDE_TEXT, DEFAULT_EVENT_EXCLUDE_TEXT)
+            ),
+            rate_limit_per_minute=_coerce_int_option(
+                opts, CONF_RATE_LIMIT_PER_MINUTE, DEFAULT_RATE_LIMIT_PER_MINUTE
+            ),
+            rate_limit_burst=_coerce_int_option(
+                opts, CONF_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_BURST
+            ),
         )
