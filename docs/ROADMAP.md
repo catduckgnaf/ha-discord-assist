@@ -231,11 +231,43 @@ User mapping beats role mapping; deny beats allow; no match means ignored
 
 ### Phasing
 
-| Phase | Ships | Depends on |
-| --- | --- | --- |
-| A | Profiles in options, user and role mapping, per-profile HA user, channel and DM rules, quiet hours, rate limit, per-profile agent, audit event | nothing |
-| B | Scoped tools per profile (areas, domains, entity allow and deny, read-only tools) | the bundled agent (#40) |
-| C | Approval buttons for sensitive tools, approver list | B and the button dispatcher (suggestion 9) |
+| Phase | Ships | Depends on | Status |
+| --- | --- | --- | --- |
+| A | Profiles in options, user and role mapping, per-profile HA user, channel and DM rules, quiet hours, rate limit, per-profile agent, audit event | nothing | #12, PR #59 open, needs rework (see below) |
+| B | Scoped tools per profile (areas, domains, entity allow and deny, read-only tools) | the bundled agent (#40) | Scoped LLM API merged (#34 via #68); bundled agent gate #69 and ha-mcp bridge #70 open, need rework |
+| C | Approval buttons for sensitive tools, approver list | B and the button dispatcher | #35, PR #67 open, needs rework; dispatcher merged (#43) |
+
+### Tracking (epic #39)
+
+Status as of 2026-11-15, after the merge pass over the open pull requests.
+The lanes were built as independent pull requests from `main`, each with its
+own copy of the substrate it needed. Everything outside the permission gate
+is merged; the gate itself is not, because review found fail-open paths that
+need one design across the phases rather than a fix at merge time. The
+findings are on each pull request.
+
+| Work item | Issue | PR | Status |
+| --- | --- | --- | --- |
+| Phase A: profiles, user and role mapping, gatekeeping, audit | #12 | #59 | Open: DM deny bypass, profile edit wipes restrictions, channel list acts as a listening list |
+| Phase B: scoped LLM API | #34 | #68 | Merged; scopes have no options UI until profiles land |
+| Phase C: approval buttons, approver list | #35 | #67 | Open: `request_approval` lets a non-admin run any service as the admin; own dispatcher, not yet on #43 |
+| Bundled agent with ha-mcp tools (phases B and C) | #40 | #69 | Open: tool gate bypassable (`ha_call_tool`, `ha_call_service` domain/service split, area targets, empty allowlist means all) |
+| In-process ha-mcp LLM API for the bundled agent | #41 | #70 | Open: argument check and non-admin tool filter bypassable |
+| Decision: which agent Luna runs behind | #36 | n/a | Decided, issue closed (bundled agent, #40) |
+| Decision: Server Members intent for role mapping | #37 | #65 | Open, lands with phase A (resolution failure must deny when deny roles exist) |
+| Decision: shared-channel history per profile | #38 | #64 | Merged |
+
+Merged supporting work: the persistent button dispatcher and shared send
+helper (#13, #43), acknowledge first (#14, #48 and #71), per-user rate limit
+(#28, #44), agent per channel or user (#18, #55), re-read state before
+acting (#30, #63), retire stale buttons (#27, #61).
+
+Next for this epic: one router path (`resolve` the request's profile, HA
+user, agent, device and conversation key, then `gate` it) used by messages,
+text commands, slash commands and buttons; one argument parser and scope
+check shared by the scoped API, the bundled agent and the ha-mcp bridge;
+approvals rebuilt as button handlers on the shared store. Each phase's
+checkbox on #39 is ticked when its pull request merges.
 
 ### Decision: a bundled agent with ha-mcp tools (2026-11-15)
 
@@ -288,11 +320,16 @@ continued and idle-expire on their own.
 - ~~Which agent should Luna run behind?~~ Decided: the bundled agent above (#36, #40).
 - (Original question) Tier 3 needs an agent that supports Home
   Assistant LLM APIs; Extended OpenAI Conversation does not.
-- Discord roles need the Server Members intent to read member roles reliably.
-  It is a privileged intent; acceptable for a private server.
+- Discord roles need the Server Members intent to read member roles
+  reliably. Proposed in #37 (open PR #65): no privileged intent; roles come
+  from the message's member payload first, with a cached `fetch_member`
+  fallback, and a repair issue if role mapping is configured but roles
+  cannot be resolved. Lands with phase A; the live-server check of
+  partial-member payloads stays open on #37.
 - ~~Should profiles also restrict which conversation history a user can see
-  in shared channels?~~ Decided: shared per channel by default, with a
-  per-user scope option (see the decision above).
+  in shared channels?~~ Decided (#38, merged in #64): guild channels keep one
+  shared conversation by default; a `conversation_scope` option switches
+  channels to per-user history. DMs are always per user.
 
 ## 0.3.1 (built)
 
@@ -308,4 +345,6 @@ issue.
 7. Agent tuning guide in the docs (30).
 
 0.4.0: permissions phase A (#12), the button dispatcher (#13, #14), and the
-bundled agent with ha-mcp tools (#40), which delivers phases B and C.
+bundled agent with ha-mcp tools (#40), which delivers phases B and C. Live
+status for all of it is in the tracking table under "Per-user permissions:
+scope" above (epic #39).
